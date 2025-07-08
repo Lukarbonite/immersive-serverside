@@ -2,13 +2,13 @@ package nl.theepicblock.immersive_cursedness.mixin;
 
 import com.mojang.authlib.GameProfile;
 import me.shedaniel.autoconfig.AutoConfig;
-import net.minecraft.nbt.NbtCompound;
-import net.minecraft.network.encryption.PlayerPublicKey;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.storage.ReadView; // <-- Import this
+import net.minecraft.storage.WriteView; // <-- Import this
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
-import nl.theepicblock.immersive_cursedness.Config;
+import nl.theepicblock.immersive_cursedness.IC_Config;
 import nl.theepicblock.immersive_cursedness.PlayerInterface;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -19,8 +19,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @SuppressWarnings("PointlessBooleanExpression")
 @Mixin(ServerPlayerEntity.class)
 public abstract class MixinServerPlayerEntity extends MixinPlayerEntity implements PlayerInterface {
-	public MixinServerPlayerEntity(World world, BlockPos pos, float yaw, GameProfile profile, PlayerPublicKey publicKey) {
-		super(world, pos, yaw, profile);
+	public MixinServerPlayerEntity(World world, BlockPos pos, float yaw, GameProfile gameProfile) {
+		super(world, pos, yaw, gameProfile);
 	}
 
 	@Unique
@@ -60,26 +60,21 @@ public abstract class MixinServerPlayerEntity extends MixinPlayerEntity implemen
 		return (ServerWorld) getWorld();
 	}
 
-	@Inject(method = "writeCustomDataToNbt", at = @At("HEAD"))
-	public void writeInject(NbtCompound tag, CallbackInfo ci) {
-		if (enabled != AutoConfig.getConfigHolder(Config.class).getConfig().defaultEnabled) {
-			tag.putBoolean("immersivecursednessenabled", enabled);
+	@Inject(method = "writeCustomData(Lnet/minecraft/storage/WriteView;)V", at = @At("HEAD"))
+	public void writeInject(WriteView view, CallbackInfo ci) {
+		if (enabled != AutoConfig.getConfigHolder(IC_Config.class).getConfig().defaultEnabled) {
+			view.putBoolean("immersivecursednessenabled", enabled);
 		}
 	}
 
-	@Inject(method = "readCustomDataFromNbt", at = @At("HEAD"))
-	public void readInject(NbtCompound tag, CallbackInfo ci) {
-		if (tag.contains("immersivecursednessenabled")) {
-			enabled = tag.getBoolean("immersivecursednessenabled");
-		} else {
-			enabled = AutoConfig.getConfigHolder(Config.class).getConfig().defaultEnabled;
-		}
+	@Inject(method = "readCustomData(Lnet/minecraft/storage/ReadView;)V", at = @At("HEAD"))
+	public void readInject(ReadView view, CallbackInfo ci) {
+		enabled = view.getBoolean("immersivecursednessenabled", AutoConfig.getConfigHolder(IC_Config.class).getConfig().defaultEnabled);
 	}
 
 	@Override
 	public void immersivecursedness$setEnabled(boolean v) {
 		enabled = v;
-
 	}
 
 	@Override

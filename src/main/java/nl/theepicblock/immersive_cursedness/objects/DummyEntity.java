@@ -8,13 +8,14 @@ import net.minecraft.entity.EntityDimensions;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.data.DataTracker;
-import net.minecraft.nbt.NbtCompound;
 import net.minecraft.network.listener.ClientPlayPacketListener;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.PositionFlag;
 import net.minecraft.server.network.EntityTrackerEntry;
-import net.minecraft.server.world.ServerWorld;
+import net.minecraft.server.world.ServerWorld; // <-- Import this
 import net.minecraft.state.property.Properties;
+import net.minecraft.storage.ReadView; // <-- Import this
+import net.minecraft.storage.WriteView; // <-- Import this
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
@@ -47,13 +48,11 @@ public class DummyEntity extends Entity {
     }
 
     @Override
-    protected void readCustomDataFromNbt(NbtCompound tag) {
-
+    protected void readCustomData(ReadView view) {
     }
 
     @Override
-    protected void writeCustomDataToNbt(NbtCompound tag) {
-
+    protected void writeCustomData(WriteView view) {
     }
 
     @Override
@@ -72,7 +71,7 @@ public class DummyEntity extends Entity {
     }
 
     protected TeleportTarget getTeleportTarget(ServerWorld destination) {
-	    if (destination == null) {
+        if (destination == null) {
             return null;
         } else {
             boolean bl = destination.getRegistryKey() == World.NETHER;

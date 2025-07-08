@@ -20,17 +20,17 @@ import org.jetbrains.annotations.Nullable;
 import java.util.*;
 
 public class PlayerManager {
-    private final Config config;
+    private final IC_Config icconfig;
     private final ServerPlayerEntity player;
     private final PortalManager portalManager;
     private BlockCache blockCache = new BlockCache();
     private final List<UUID> hiddenEntities = new ArrayList<>();
     private ServerWorld previousWorld;
 
-    public PlayerManager(ServerPlayerEntity player, Config config) {
+    public PlayerManager(ServerPlayerEntity player, IC_Config icconfig) {
         this.player = player;
-        portalManager = new PortalManager(player, config);
-        this.config = config;
+        portalManager = new PortalManager(player, icconfig);
+        this.icconfig = icconfig;
     }
 
     public void tick(int tickCount) {
@@ -54,7 +54,7 @@ public class PlayerManager {
             portalManager.update();
         }
 
-        List<FlatStandingRectangle> sentLayers = new ArrayList<>(portalManager.getPortals().size()*config.portalDepth);
+        List<FlatStandingRectangle> sentLayers = new ArrayList<>(portalManager.getPortals().size()* icconfig.portalDepth);
         Chunk2IntMap sentBlocks = new Chunk2IntMap();
         BlockUpdateMap toBeSent = new BlockUpdateMap();
         List<BlockEntityUpdateS2CPacket> blockEntityPackets = new ArrayList<>();
@@ -86,10 +86,10 @@ public class PlayerManager {
 
             //iterate through all layers behind the portal
             FlatStandingRectangle rect = portal.toFlatStandingRectangle();
-            for (int i = 1; i < config.portalDepth; i++) {
+            for (int i = 1; i < icconfig.portalDepth; i++) {
                 FlatStandingRectangle rect2 = rect.expand(i, player.getCameraPosVec(1));
                 sentLayers.add(rect2);
-                if (config.debugParticles) rect2.visualise(player);
+                if (icconfig.debugParticles) rect2.visualise(player);
 
                 entities.removeIf((entity) -> {
                     if (rect2.contains(entity.getPos())) {
@@ -108,17 +108,17 @@ public class PlayerManager {
                 });
 
                 //go through all blocks in this layer and use the transformProfile to get the correct block in the nether. Then send it to the client
-                rect2.iterateClamped(player.getPos(), config.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationWorld, transformProfile), (pos) -> {
+                rect2.iterateClamped(player.getPos(), icconfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationWorld, transformProfile), (pos) -> {
                     double dist = Util.getDistance(pos, portal.getLowerLeft());
-                    if (dist > config.squaredAtmosphereRadiusPlusOne) return;
+                    if (dist > icconfig.squaredAtmosphereRadiusPlusOne) return;
 
                     BlockState ret;
                     BlockEntity entity;
 
-                    if (dist > config.squaredAtmosphereRadius) {
+                    if (dist > icconfig.squaredAtmosphereRadius) {
 	                    entity = null;
 	                    ret = atmosphereBlock;
-                    } else if (dist > config.squaredAtmosphereRadiusMinusOne) {
+                    } else if (dist > icconfig.squaredAtmosphereRadiusMinusOne) {
 	                    entity = null;
 	                    ret = atmosphereBetweenBlock;
                     } else {
@@ -161,7 +161,7 @@ public class PlayerManager {
                     blockEntityPackets.add(BlockEntityUpdateS2CPacket.create(fakeEntity, (e, reg)->entity.toInitialChunkDataNbt(reg)));
                 }
             }
-            if (config.debugParticles) Util.sendParticle(player, Util.getCenter(pos), 1, 0, originalBlock != cachedState ? 0 : 1);
+            if (icconfig.debugParticles) Util.sendParticle(player, Util.getCenter(pos), 1, 0, originalBlock != cachedState ? 0 : 1);
         });
 
         entities.forEach(entity -> {
@@ -198,18 +198,19 @@ public class PlayerManager {
         return null;
     }
 
+    //get all of the old blocks and remove them
     public void purgeCache() {
         BlockUpdateMap packetStorage = new BlockUpdateMap();
         ((PlayerInterface)player).immersivecursedness$setCloseToPortal(false);
         blockCache.purgeAll((pos, cachedState) -> {
-            BlockState originalBlock = Util.getBlockAsync(player.getServerWorld(), pos);
+            BlockState originalBlock = Util.getBlockAsync(player.getWorld(), pos);
             if (originalBlock != cachedState) {
                 packetStorage.put(pos, originalBlock);
             }
-            if (config.debugParticles) Util.sendParticle(player, Util.getCenter(pos), 1, 0, originalBlock != cachedState ? 0 : 1);
+            if (icconfig.debugParticles) Util.sendParticle(player, Util.getCenter(pos), 1, 0, originalBlock != cachedState ? 0 : 1);
         });
         for (Portal portal : portalManager.getPortals()) {
-            BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(pos -> packetStorage.put(pos.toImmutable(), Util.getBlockAsync(player.getServerWorld(), pos)));
+            BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(pos -> packetStorage.put(pos.toImmutable(), Util.getBlockAsync(player.getWorld(), pos)));
         }
         packetStorage.sendTo(this.player);
     }
@@ -218,12 +219,12 @@ public class PlayerManager {
         return world.getEntitiesByType(
                 new AllExceptPlayer(),
                 new Box(
-                        player.getX() - config.renderDistance*16,
-                        player.getY() - config.renderDistance*16,
-                        player.getZ() - config.renderDistance*16,
-                        player.getX() + config.renderDistance*16,
-                        player.getY() + config.renderDistance*16,
-                        player.getZ() + config.renderDistance*16
+                        player.getX() - icconfig.renderDistance*16,
+                        player.getY() - icconfig.renderDistance*16,
+                        player.getZ() - icconfig.renderDistance*16,
+                        player.getX() + icconfig.renderDistance*16,
+                        player.getY() + icconfig.renderDistance*16,
+                        player.getZ() + icconfig.renderDistance*16
                 ),
                 (entity) -> true
         );

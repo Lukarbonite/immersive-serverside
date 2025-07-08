@@ -15,7 +15,7 @@ public class CursednessServer {
     private long nextTick;
     private int tickCount;
     private final Map<ServerPlayerEntity, PlayerManager> playerManagers = new HashMap<>();
-    private final Config config = AutoConfig.getConfigHolder(Config.class).getConfig();
+    private final IC_Config icconfig = AutoConfig.getConfigHolder(IC_Config.class).getConfig();
 
     public CursednessServer(MinecraftServer server) {
         this.server = server;
@@ -55,7 +55,7 @@ public class CursednessServer {
         playerManagers.entrySet().removeIf(i -> !playerList.contains(i.getKey()));
         for (ServerPlayerEntity player : playerList) {
             if (!playerManagers.containsKey(player)) {
-                playerManagers.put(player, new PlayerManager(player, config));
+                playerManagers.put(player, new PlayerManager(player, icconfig));
             }
         }
 

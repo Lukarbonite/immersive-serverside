@@ -17,7 +17,7 @@ public class ImmersiveCursedness implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        AutoConfig.register(Config.class, JanksonConfigSerializer::new);
+        AutoConfig.register(IC_Config.class, JanksonConfigSerializer::new);
 
         ServerLifecycleEvents.SERVER_STARTED.register(minecraftServer -> {
             cursednessThread = new Thread(() -> {

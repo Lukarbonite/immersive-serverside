@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.*;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+		import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 
 @Mixin(ServerPlayNetworkHandler.class)
@@ -45,20 +45,12 @@ public abstract class ServerPlayNetworkHandlerMixin {
 		}
 	}
 
-	@Redirect(method = "onPlayerInteractBlock", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/network/ServerPlayerEntity;getServerWorld()Lnet/minecraft/server/world/ServerWorld;"))
+	@Redirect(method = "onPlayerInteractBlock", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/network/ServerPlayerEntity;getWorld()Lnet/minecraft/server/world/ServerWorld;"))
 	public ServerWorld modifyWorld(ServerPlayerEntity player, PlayerInteractBlockC2SPacket packet) {
 		if (transformProfile != null) {
 			return Util.getDestination(player);
 		}
-		return player.getServerWorld();
-	}
-
-	@ModifyArg(method = "onPlayerInteractBlock", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/world/ServerWorld;canPlayerModifyAt(Lnet/minecraft/entity/player/PlayerEntity;Lnet/minecraft/util/math/BlockPos;)Z"))
-	public BlockPos modifyCanBreakCheck(BlockPos pos) {
-		if (transformProfile != null) {
-			return transformProfile.transform(pos);
-		}
-		return pos;
+		return player.getWorld();
 	}
 
 	@ModifyArg(method = "onPlayerInteractBlock", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/network/ServerPlayNetworkHandler;sendPacket(Lnet/minecraft/network/packet/Packet;)V"))
@@ -82,7 +74,7 @@ public abstract class ServerPlayNetworkHandlerMixin {
 
 	@Inject(method = "onPlayerInteractBlock", at = @At("RETURN"))
 	public void clearPortalTransform(PlayerInteractBlockC2SPacket packet, CallbackInfo ci) {
- 		((PlayerInterface)player).immersivecursedness$deFakeWorld();
+		((PlayerInterface)player).immersivecursedness$deFakeWorld();
 		transformProfile = null;
 	}
 }

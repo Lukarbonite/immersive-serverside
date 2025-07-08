@@ -5,7 +5,7 @@ import me.shedaniel.cloth.clothconfig.shadowed.blue.endless.jankson.Comment;
 
 @SuppressWarnings("FieldMayBeFinal")
 @me.shedaniel.autoconfig.annotation.Config(name = "immersive-cursedness")
-public class Config implements ConfigData {
+public class IC_Config implements ConfigData {
 	public int horizontalSendLimit = 70;
 	@Comment("Should usually be atmosphereRadius+2")
 	public int portalDepth = 30;

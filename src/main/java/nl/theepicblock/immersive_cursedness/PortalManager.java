@@ -23,18 +23,18 @@ public class PortalManager {
     private final ArrayList<BlockPos> checked = new ArrayList<>();
     private ArrayList<Portal> portals = new ArrayList<>();
     private final ServerPlayerEntity player;
-    private final Config config;
+    private final IC_Config icconfig;
     public static boolean portalForcerMixinActivate = false;
 
-    public PortalManager(ServerPlayerEntity player, Config config) {
+    public PortalManager(ServerPlayerEntity player, IC_Config icconfig) {
         this.player = player;
-        this.config = config;
+        this.icconfig = icconfig;
     }
 
     public void update() {
         ServerWorld world = ((PlayerInterface)player).immersivecursedness$getUnfakedWorld();
 
-        Stream<PointOfInterest> portalStream = getPortalsInChunkRadius(world.getPointOfInterestStorage(), player.getBlockPos(), config.renderDistance);
+        Stream<PointOfInterest> portalStream = getPortalsInChunkRadius(world.getPointOfInterestStorage(), player.getBlockPos(), icconfig.renderDistance);
         PointOfInterest[] portals = portalStream.toArray(PointOfInterest[]::new);
 
         checked.clear();
@@ -125,7 +125,7 @@ public class PortalManager {
 
     private void garbageCollect(ServerPlayerEntity player) {
         portals.removeIf(portal ->
-            portal.getDistance(player.getBlockPos()) > config.renderDistance*16
+            portal.getDistance(player.getBlockPos()) > icconfig.renderDistance*16
         );
         portals.removeIf(portal -> {
             for (Portal portal1 : portals) {
