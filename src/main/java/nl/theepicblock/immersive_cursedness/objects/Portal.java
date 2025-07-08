@@ -152,6 +152,6 @@ public class Portal {
         Direction.Axis other = Util.rotate(axis);
         double od = Math.abs(Util.get(p, other)-Util.get(lowerLeft,other));
         if (od > i) return false;
-        return (lrd*lrd+yd*yd*od*od)<i*i;
+        return (lrd*lrd+yd*yd+od*od)<i*i;
     }
 }
