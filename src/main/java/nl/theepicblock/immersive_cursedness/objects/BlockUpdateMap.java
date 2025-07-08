@@ -1,15 +1,19 @@
 package nl.theepicblock.immersive_cursedness.objects;
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.shorts.Short2ObjectMap;
 import it.unimi.dsi.fastutil.shorts.Short2ObjectOpenHashMap;
-import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
-import net.minecraft.block.Block;
+import it.unimi.dsi.fastutil.shorts.ShortSet;
 import net.minecraft.block.BlockState;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
+import net.minecraft.registry.Registry;
+import net.minecraft.registry.RegistryKeys;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkSectionPos;
+import net.minecraft.world.biome.Biome;
+import net.minecraft.world.chunk.ChunkSection;
 
 public class BlockUpdateMap extends Long2ObjectOpenHashMap<Short2ObjectMap<BlockState>> {
     public void put(BlockPos p, BlockState t) {
@@ -29,26 +33,32 @@ public class BlockUpdateMap extends Long2ObjectOpenHashMap<Short2ObjectMap<Block
     }
 
     public void sendTo(ServerPlayerEntity player) {
-        this.forEach((chunkSection, chunkContents) -> {
-            var buf = PacketByteBufs.create();
-            buf.writeLong(chunkSection);
-            //buf.writeBoolean(false);
-            buf.writeVarInt(chunkContents.size());
+        Registry<Biome> biomeRegistry = player.getWorld().getRegistryManager().getOrThrow(RegistryKeys.BIOME);
 
-            for (Short2ObjectMap.Entry<BlockState> entry : chunkContents.short2ObjectEntrySet()) {
-                buf.writeVarLong(((long)Block.getRawIdFromState(entry.getValue()) << 12 | entry.getShortKey()));
+        for (Long2ObjectMap.Entry<Short2ObjectMap<BlockState>> entry : this.long2ObjectEntrySet()) {
+            ChunkSectionPos chunkSectionPos = ChunkSectionPos.from(entry.getLongKey());
+            Short2ObjectMap<BlockState> chunkContents = entry.getValue();
+
+            if (chunkContents.isEmpty()) {
+                continue;
             }
 
-            ChunkDeltaUpdateS2CPacket packet = ChunkDeltaUpdateS2CPacket.CODEC.decode(buf);
-            player.networkHandler.sendPacket(packet);
-        });
+            ShortSet positions = chunkContents.keySet();
+            ChunkSection chunkSection = new ChunkSection(biomeRegistry);
+            for (short pos : positions) {
+                chunkSection.setBlockState(
+                        ChunkSectionPos.unpackLocalX(pos),
+                        ChunkSectionPos.unpackLocalY(pos),
+                        ChunkSectionPos.unpackLocalZ(pos),
+                        chunkContents.get(pos)
+                );
+            }
+
+            player.networkHandler.sendPacket(new ChunkDeltaUpdateS2CPacket(chunkSectionPos, positions, chunkSection));
+        }
     }
 
     private long getChunkPos(BlockPos p) {
-        long l = 0;
-        l |= ((p.getY() >> 4) & 0b11111111111111111111);
-        l |= (long)((p.getZ() >> 4) & 0b1111111111111111111111) << 20;
-        l |= (long)((p.getX() >> 4) & 0b1111111111111111111111) << 42;
-        return l;
+        return ChunkSectionPos.asLong(p.getX() >> 4, p.getY() >> 4, p.getZ() >> 4);
     }
 }
