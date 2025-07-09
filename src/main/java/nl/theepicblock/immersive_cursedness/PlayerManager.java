@@ -17,7 +17,10 @@ import net.minecraft.world.World;
 import nl.theepicblock.immersive_cursedness.objects.*;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.ConcurrentModificationException;
+import java.util.List;
+import java.util.UUID;
 
 public class PlayerManager {
     private final IC_Config icconfig;
@@ -45,7 +48,6 @@ public class PlayerManager {
 
         boolean justWentThroughPortal = false;
         if (sourceWorld != previousWorld) {
-            blockCache = new BlockCache();
             justWentThroughPortal = true;
         }
         var bottomOfWorld = sourceWorld.getBottomY();
@@ -116,11 +118,11 @@ public class PlayerManager {
                     BlockEntity entity;
 
                     if (dist > icconfig.squaredAtmosphereRadius) {
-	                    entity = null;
-	                    ret = atmosphereBlock;
+                        entity = null;
+                        ret = atmosphereBlock;
                     } else if (dist > icconfig.squaredAtmosphereRadiusMinusOne) {
-	                    entity = null;
-	                    ret = atmosphereBetweenBlock;
+                        entity = null;
+                        ret = atmosphereBetweenBlock;
                     } else {
                         ret = transformProfile.transformAndGetFromWorld(pos, destinationView);
                         entity = transformProfile.transformAndGetFromWorldBlockEntity(pos, destinationView);
@@ -136,10 +138,15 @@ public class PlayerManager {
                             blockCache.put(imPos, ret);
                             toBeSent.put(imPos, ret);
                             if (entity != null) {
+                                final ServerWorld playerWorld = ((PlayerInterface)player).immersivecursedness$getUnfakedWorld();
                                 BlockEntity fakeEntity = new BlockEntity(entity.getType(), imPos, entity.getCachedState()) {
+                                    @Override
+                                    public World getWorld() {
+                                        return playerWorld;
+                                    }
                                 };
 
-                                blockEntityPackets.add(BlockEntityUpdateS2CPacket.create(fakeEntity, (e, reg)->entity.toInitialChunkDataNbt(reg)));
+                                blockEntityPackets.add(BlockEntityUpdateS2CPacket.create(fakeEntity, (e, reg) -> entity.toInitialChunkDataNbt(reg)));
                             }
                         }
                     }
@@ -155,9 +162,13 @@ public class PlayerManager {
                 toBeSent.put(pos, originalBlock);
                 BlockEntity entity = sourceView.getBlockEntity(pos);
                 if (entity != null) {
+                    final ServerWorld playerWorld = ((PlayerInterface)player).immersivecursedness$getUnfakedWorld();
                     BlockEntity fakeEntity = new BlockEntity(entity.getType(), pos, entity.getCachedState()) {
+                        @Override
+                        public World getWorld() {
+                            return playerWorld;
+                        }
                     };
-
                     blockEntityPackets.add(BlockEntityUpdateS2CPacket.create(fakeEntity, (e, reg)->entity.toInitialChunkDataNbt(reg)));
                 }
             }
@@ -203,15 +214,12 @@ public class PlayerManager {
         BlockUpdateMap packetStorage = new BlockUpdateMap();
         ((PlayerInterface)player).immersivecursedness$setCloseToPortal(false);
         blockCache.purgeAll((pos, cachedState) -> {
-            BlockState originalBlock = Util.getBlockAsync(player.getWorld(), pos);
+            BlockState originalBlock = Util.getBlockAsync(((PlayerInterface)player).immersivecursedness$getUnfakedWorld(), pos);
             if (originalBlock != cachedState) {
                 packetStorage.put(pos, originalBlock);
             }
             if (icconfig.debugParticles) Util.sendParticle(player, Util.getCenter(pos), 1, 0, originalBlock != cachedState ? 0 : 1);
         });
-        for (Portal portal : portalManager.getPortals()) {
-            BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(pos -> packetStorage.put(pos.toImmutable(), Util.getBlockAsync(player.getWorld(), pos)));
-        }
         packetStorage.sendTo(this.player);
     }
 
