@@ -51,28 +51,32 @@ public class BlockCache {
 
 	public void purge(Chunk2IntMap blockPerChunk, List<FlatStandingRectangle> rects, BiConsumer<BlockPos, BlockState> onRemove) {
 		if (size == blockPerChunk.getTotal()) return;
-		for (Int2ObjectMap.Entry<Int2ObjectMap<Map<BlockPos,BlockState>>> sliceEntry : cache.int2ObjectEntrySet()) {
+
+		var sliceIterator = cache.int2ObjectEntrySet().iterator();
+		while (sliceIterator.hasNext()) {
+			var sliceEntry = sliceIterator.next();
 			int x = sliceEntry.getIntKey();
-			Int2ObjectMap<Map<BlockPos,BlockState>> cacheSlice = sliceEntry.getValue();
+			Int2ObjectMap<Map<BlockPos, BlockState>> cacheSlice = sliceEntry.getValue();
 
 			Int2IntMap countSlice = blockPerChunk.getSlice(x);
 			if (countSlice == null) { //there was nothing sent in this entire slice, so it can be purged
 				purge(cacheSlice, onRemove);
-				cache.remove(x);
+				sliceIterator.remove();
 				continue;
 			}
 
-			for (Int2ObjectMap.Entry<Map<BlockPos,BlockState>> mapEntry : cacheSlice.int2ObjectEntrySet()) {
+			var mapIterator = cacheSlice.int2ObjectEntrySet().iterator();
+			while (mapIterator.hasNext()) {
+				var mapEntry = mapIterator.next();
 				int zPos = mapEntry.getIntKey();
 				int oldZ = mapEntry.getValue().size();
 				int newZ = countSlice.get(zPos);
 
 				if (newZ == 0) { //there was nothing sent in this chunk, so it can be purged entirely
 					purge(mapEntry.getValue(), onRemove);
-					cacheSlice.remove(zPos);
-				} else
-				if (newZ != oldZ) {
-					Map<BlockPos,BlockState> map = mapEntry.getValue();
+					mapIterator.remove();
+				} else if (newZ != oldZ) {
+					Map<BlockPos, BlockState> map = mapEntry.getValue();
 					map.entrySet().removeIf((entry) -> {
 						BlockPos mapBlockPos = entry.getKey();
 						for (FlatStandingRectangle rect : rects) {

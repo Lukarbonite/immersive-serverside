@@ -18,6 +18,9 @@ import net.minecraft.world.poi.PointOfInterest;
 import nl.theepicblock.immersive_cursedness.mixin.ServerChunkManagerInvoker;
 import nl.theepicblock.immersive_cursedness.objects.TransformProfile;
 
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+
 public class Util {
     public static int follow(PointOfInterest[] list, BlockPos start, Direction direction) {
         for (int i = 1; i < 50; i++) {
@@ -36,19 +39,19 @@ public class Util {
     }
 
     public static int get(BlockPos b, Direction.Axis axis) {
-	    return switch (axis) {
-		    case X -> b.getX();
-		    case Y -> b.getY();
-		    case Z -> b.getZ();
-	    };
+        return switch (axis) {
+            case X -> b.getX();
+            case Y -> b.getY();
+            case Z -> b.getZ();
+        };
     }
 
     public static double get(Vec3d b, Direction.Axis axis) {
-	    return switch (axis) {
-		    case X -> b.getX();
-		    case Y -> b.getY();
-		    case Z -> b.getZ();
-	    };
+        return switch (axis) {
+            case X -> b.getX();
+            case Y -> b.getY();
+            case Z -> b.getZ();
+        };
     }
 
     public static void set(BlockPos.Mutable b, int i, Direction.Axis axis) {
@@ -115,7 +118,16 @@ public class Util {
 
     public static OptionalChunk<Chunk> getChunkAsync(ServerWorld world, int x, int z) {
         ServerChunkManagerInvoker chunkManager = (ServerChunkManagerInvoker)world.getChunkManager();
-	    return chunkManager.ic$callGetChunkFuture(x, z, ChunkStatus.FULL, false).join();
+        return chunkManager.ic$callGetChunkFuture(x, z, ChunkStatus.FULL, false).join();
+    }
+
+    public static Optional<OptionalChunk<Chunk>> tryGetChunkAsync(ServerWorld world, int x, int z) {
+        ServerChunkManagerInvoker chunkManager = (ServerChunkManagerInvoker)world.getChunkManager();
+        CompletableFuture<OptionalChunk<Chunk>> future = chunkManager.ic$callGetChunkFuture(x, z, ChunkStatus.FULL, false);
+        if (future.isDone()) {
+            return Optional.of(future.getNow(null));
+        }
+        return Optional.empty();
     }
 
     public static ServerWorld getDestination(ServerPlayerEntity player) {

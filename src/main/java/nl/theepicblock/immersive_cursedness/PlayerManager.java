@@ -18,6 +18,7 @@ import nl.theepicblock.immersive_cursedness.objects.*;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.ConcurrentModificationException;
 import java.util.List;
 import java.util.UUID;
@@ -29,6 +30,10 @@ public class PlayerManager {
     private BlockCache blockCache = new BlockCache();
     private final List<UUID> hiddenEntities = new ArrayList<>();
     private ServerWorld previousWorld;
+
+    // These are now instance variables to persist their internal caches.
+    private AsyncWorldView sourceView;
+    private AsyncWorldView destinationView;
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icconfig) {
         this.player = player;
@@ -43,20 +48,20 @@ public class PlayerManager {
 
         ServerWorld sourceWorld = ((PlayerInterface)player).immersivecursedness$getUnfakedWorld();
         ServerWorld destinationWorld = Util.getDestination(sourceWorld);
-        AsyncWorldView sourceView = new AsyncWorldView(sourceWorld);
-        AsyncWorldView destinationView = new AsyncWorldView(destinationWorld);
 
         boolean justWentThroughPortal = false;
-        if (sourceWorld != previousWorld) {
+        // If the world has changed or the views haven't been initialized, create new ones.
+        if (sourceWorld != previousWorld || sourceView == null || destinationView == null) {
             justWentThroughPortal = true;
+            this.sourceView = new AsyncWorldView(sourceWorld, true);
+            this.destinationView = new AsyncWorldView(destinationWorld, true);
         }
-        var bottomOfWorld = sourceWorld.getBottomY();
 
         if (tickCount % 30 == 0 || justWentThroughPortal) {
             portalManager.update();
         }
 
-        List<FlatStandingRectangle> sentLayers = new ArrayList<>(portalManager.getPortals().size()* icconfig.portalDepth);
+        List<FlatStandingRectangle> sentLayers = new ArrayList<>();
         Chunk2IntMap sentBlocks = new Chunk2IntMap();
         BlockUpdateMap toBeSent = new BlockUpdateMap();
         List<BlockEntityUpdateS2CPacket> blockEntityPackets = new ArrayList<>();
@@ -65,7 +70,7 @@ public class PlayerManager {
         try {
             entities = this.getEntitiesInRange(sourceWorld);
             if (tickCount % 200 == 0) removeNoLongerExistingEntities(entities);
-        } catch (ConcurrentModificationException ignored) { entities = new ArrayList<>(0); } // Not such a big deal, we'll get the entities next tick
+        } catch (ConcurrentModificationException ignored) { entities = new ArrayList<>(0); }
 
         BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
         BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
@@ -73,6 +78,7 @@ public class PlayerManager {
         if (player.hasPortalCooldown())return;
 
         boolean isCloseToPortal = false;
+        var bottomOfWorld = sourceWorld.getBottomY();
         //iterate through all portals
         for (Portal portal : portalManager.getPortals()) {
             if (portal.isCloserThan(player.getPos(), 6)) {
@@ -124,8 +130,8 @@ public class PlayerManager {
                         entity = null;
                         ret = atmosphereBetweenBlock;
                     } else {
-                        ret = transformProfile.transformAndGetFromWorld(pos, destinationView);
-                        entity = transformProfile.transformAndGetFromWorldBlockEntity(pos, destinationView);
+                        ret = transformProfile.transformAndGetFromWorld(pos, this.destinationView);
+                        entity = transformProfile.transformAndGetFromWorldBlockEntity(pos, this.destinationView);
                     }
 
                     if (pos.getY() == bottomOfWorld+1) ret = atmosphereBetweenBlock;
@@ -134,7 +140,7 @@ public class PlayerManager {
                     BlockPos imPos = pos.toImmutable();
                     sentBlocks.increment(imPos);
                     if (!(blockCache.get(imPos) == ret)) {
-                        if (!ret.isAir() || !sourceView.getBlock(pos).isAir()) {
+                        if (!ret.isAir() || !this.sourceView.getBlock(pos).isAir()) {
                             blockCache.put(imPos, ret);
                             toBeSent.put(imPos, ret);
                             if (entity != null) {
@@ -157,10 +163,10 @@ public class PlayerManager {
 
         //get all of the old blocks and remove them
         blockCache.purge(sentBlocks, sentLayers, (pos, cachedState) -> {
-            BlockState originalBlock = sourceView.getBlock(pos);
+            BlockState originalBlock = this.sourceView.getBlock(pos);
             if (originalBlock != cachedState) {
                 toBeSent.put(pos, originalBlock);
-                BlockEntity entity = sourceView.getBlockEntity(pos);
+                BlockEntity entity = this.sourceView.getBlockEntity(pos);
                 if (entity != null) {
                     final ServerWorld playerWorld = ((PlayerInterface)player).immersivecursedness$getUnfakedWorld();
                     BlockEntity fakeEntity = new BlockEntity(entity.getType(), pos, entity.getCachedState()) {

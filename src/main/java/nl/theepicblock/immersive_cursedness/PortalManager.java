@@ -16,15 +16,18 @@ import nl.theepicblock.immersive_cursedness.objects.DummyEntity;
 import nl.theepicblock.immersive_cursedness.objects.Portal;
 import nl.theepicblock.immersive_cursedness.objects.TransformProfile;
 
-import java.util.ArrayList;
+import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class PortalManager {
-    private final ArrayList<BlockPos> checked = new ArrayList<>();
-    private ArrayList<Portal> portals = new ArrayList<>();
+    private final Map<BlockPos, Portal> portals = new HashMap<>();
+    private final Map<BlockPos, Integer> portalGracePeriods = new HashMap<>();
     private final ServerPlayerEntity player;
     private final IC_Config icconfig;
     public static boolean portalForcerMixinActivate = false;
+    private final Map<BlockPos, TransformProfile> transformProfileCache = new HashMap<>();
+    private static final int GRACE_PERIOD_TICKS = 100; // 5 seconds
 
     public PortalManager(ServerPlayerEntity player, IC_Config icconfig) {
         this.player = player;
@@ -33,47 +36,93 @@ public class PortalManager {
 
     public void update() {
         ServerWorld world = ((PlayerInterface)player).immersivecursedness$getUnfakedWorld();
-
-        Stream<PointOfInterest> portalStream = getPortalsInChunkRadius(world.getPointOfInterestStorage(), player.getBlockPos(), icconfig.renderDistance);
-        PointOfInterest[] portals = portalStream.toArray(PointOfInterest[]::new);
-
-        checked.clear();
-        ArrayList<Portal> newPortals = new ArrayList<>();
-
         ServerWorld destination = Util.getDestination(player);
+        Set<BlockPos> foundPortalKeys = new HashSet<>();
 
-        for (PointOfInterest portal : portals) {
-            try {
-                BlockPos portalP = portal.getPos();
-                if (checked.contains(portalP)) continue;
+        // Get all portal POIs in range and their block positions.
+        List<PointOfInterest> allPortalPois = getPortalsInChunkRadius(world.getPointOfInterestStorage(), player.getBlockPos(), icconfig.renderDistance).collect(Collectors.toList());
+        Set<BlockPos> checked = new HashSet<>();
 
-                BlockState bs = world.getBlockState(portalP);
-                Direction.Axis axis = bs.get(NetherPortalBlock.AXIS);
+        for (PointOfInterest portalPoi : allPortalPois) {
+            BlockPos startPos = portalPoi.getPos();
+            if (checked.contains(startPos)) {
+                continue;
+            }
 
-                int lowestPoint = portalP.getY()-Util.follow(portals, portalP, Direction.DOWN);
-                int highestPoint = portalP.getY()+Util.follow(portals, portalP, Direction.UP);
-                int rightOffset = Util.follow(portals, portalP, Direction.from(axis, Direction.AxisDirection.POSITIVE));
-                int leftOffset = Util.follow(portals, portalP, Direction.from(axis, Direction.AxisDirection.NEGATIVE));
+            // BFS to find all connected portal blocks for one portal structure
+            List<BlockPos> currentPortalBlocks = new ArrayList<>();
+            Queue<BlockPos> searchQueue = new ArrayDeque<>();
+            searchQueue.add(startPos);
+            checked.add(startPos);
 
-                BlockPos upperRight;
-                BlockPos lowerLeft;
-                if (axis == Direction.Axis.X) {
-                    upperRight = new BlockPos(portalP.getX()+rightOffset, highestPoint, portalP.getZ());
-                    lowerLeft = new BlockPos(portalP.getX()-leftOffset, lowestPoint, portalP.getZ());
-                } else {
-                    upperRight = new BlockPos(portalP.getX(), highestPoint, portalP.getZ()+rightOffset);
-                    lowerLeft = new BlockPos(portalP.getX(), lowestPoint, portalP.getZ()-leftOffset);
+            while (!searchQueue.isEmpty()) {
+                BlockPos currentPos = searchQueue.poll();
+                currentPortalBlocks.add(currentPos);
+                for (Direction dir : Direction.values()) {
+                    BlockPos neighbor = currentPos.offset(dir);
+                    // Use the POI list as a boundary for the search
+                    if (allPortalPois.stream().anyMatch(p -> p.getPos().equals(neighbor)) && checked.add(neighbor)) {
+                        searchQueue.add(neighbor);
+                    }
                 }
+            }
 
-                boolean hasCorners = hasCorners(world, upperRight, lowerLeft, axis);
-                TransformProfile transformProfile = createTransformProfile(lowerLeft, destination);
-                Portal p = new Portal(upperRight, lowerLeft, axis, hasCorners, transformProfile);
-                newPortals.add(p);
+            // Calculate canonical bounds to get a stable key
+            if (currentPortalBlocks.isEmpty()) continue;
 
-                BlockPos.iterate(upperRight,lowerLeft).forEach((pos) -> checked.add(pos.toImmutable()));
+            int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+            int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+
+            for (BlockPos pos : currentPortalBlocks) {
+                minX = Math.min(minX, pos.getX());
+                minY = Math.min(minY, pos.getY());
+                minZ = Math.min(minZ, pos.getZ());
+                maxX = Math.max(maxX, pos.getX());
+                maxY = Math.max(maxY, pos.getY());
+                maxZ = Math.max(maxZ, pos.getZ());
+            }
+
+            try {
+                BlockPos lowerLeft = new BlockPos(minX, minY, minZ);
+                foundPortalKeys.add(lowerLeft);
+
+                // This portal is visible. Reset its grace period.
+                portalGracePeriods.put(lowerLeft, GRACE_PERIOD_TICKS);
+
+                // If we don't already know about this portal, create it.
+                if (!portals.containsKey(lowerLeft)) {
+                    BlockState startBlockState = world.getBlockState(startPos);
+                    Direction.Axis axis = startBlockState.get(NetherPortalBlock.AXIS);
+                    BlockPos upperRight = new BlockPos(maxX, maxY, maxZ);
+
+                    TransformProfile transformProfile = transformProfileCache.computeIfAbsent(lowerLeft, ll -> createTransformProfile(ll, destination));
+                    if (transformProfile == null) continue;
+
+                    boolean hasCorners = hasCorners(world, upperRight, lowerLeft, axis);
+                    portals.put(lowerLeft, new Portal(upperRight, lowerLeft, axis, hasCorners, transformProfile));
+                }
             } catch (IllegalArgumentException ignored) {}
         }
-        this.portals = newPortals;
+
+        // --- Grace Period Handling ---
+        // Tick down grace periods for all portals, and remove any that have expired.
+        double maxDistSq = Math.pow(icconfig.renderDistance * 16, 2);
+        Iterator<Map.Entry<BlockPos, Integer>> graceIterator = portalGracePeriods.entrySet().iterator();
+        while (graceIterator.hasNext()) {
+            Map.Entry<BlockPos, Integer> entry = graceIterator.next();
+            BlockPos portalKey = entry.getKey();
+            int newGrace = entry.getValue() - 30; // 30 ticks have passed since last update
+
+            Portal portal = portals.get(portalKey);
+            // Remove if grace period is over OR if it's too far away
+            if (newGrace <= 0 || (portal != null && portal.getDistance(player.getBlockPos()) > maxDistSq)) {
+                graceIterator.remove();
+                portals.remove(portalKey);
+                transformProfileCache.remove(portalKey);
+            } else {
+                entry.setValue(newGrace);
+            }
+        }
     }
 
     private static boolean hasCorners(ServerWorld world, BlockPos upperRight, BlockPos lowerLeft, Direction.Axis axis) {
@@ -109,7 +158,7 @@ public class PortalManager {
         DummyEntity dummyEntity = new DummyEntity(((PlayerInterface)player).immersivecursedness$getUnfakedWorld(), pos);
         dummyEntity.setBodyYaw(0);
         portalForcerMixinActivate = true;
-	    TeleportTarget teleportTarget = dummyEntity.getTeleportTargetB(destination);
+        TeleportTarget teleportTarget = dummyEntity.getTeleportTargetB(destination);
         portalForcerMixinActivate = false;
 
         if (teleportTarget == null) {
@@ -123,20 +172,8 @@ public class PortalManager {
                 (int)teleportTarget.yaw());
     }
 
-    private void garbageCollect(ServerPlayerEntity player) {
-        portals.removeIf(portal ->
-            portal.getDistance(player.getBlockPos()) > icconfig.renderDistance*16
-        );
-        portals.removeIf(portal -> {
-            for (Portal portal1 : portals) {
-                if (portal1.contains(portal)) return true;
-            }
-            return false;
-        });
-    }
-
-    public ArrayList<Portal> getPortals() {
-        return portals;
+    public Collection<Portal> getPortals() {
+        return portals.values();
     }
 
     private static Stream<PointOfInterest> getPortalsInChunkRadius(PointOfInterestStorage storage, BlockPos pos, int radius) {

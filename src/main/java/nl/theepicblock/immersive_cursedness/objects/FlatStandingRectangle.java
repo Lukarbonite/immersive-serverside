@@ -86,7 +86,7 @@ public class FlatStandingRectangle {
 
     public boolean contains(BlockPos pos) {
         Direction.Axis rotAxis = Util.rotate(axis);
-        return  Util.get(pos, axis) == this.other &&
+        return  Util.get(pos, axis) == (int)Math.round(this.other) &&
                 pos.getY() > this.bottom-0.5 &&
                 pos.getY() < this.top-0.5 &&
                 Util.get(pos, rotAxis) > this.left-0.5 &&
