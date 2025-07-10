@@ -3,66 +3,105 @@ package nl.theepicblock.immersive_cursedness;
 import me.shedaniel.autoconfig.AutoConfig;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
+import org.jetbrains.annotations.Nullable;
 
-import java.util.ConcurrentModificationException;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
-public class CursednessServer {
+public class CursednessServer implements Runnable {
     private final MinecraftServer server;
+    private final IC_Config icConfig;
     private volatile boolean isServerActive = true;
     private long nextTick;
     private int tickCount;
-    private final Map<ServerPlayerEntity, PlayerManager> playerManagers = new HashMap<>();
-    private final IC_Config icconfig = AutoConfig.getConfigHolder(IC_Config.class).getConfig();
+
+    private final Map<ServerPlayerEntity, PlayerManager> playerManagers = new ConcurrentHashMap<>();
+    private final Queue<Runnable> taskQueue = new ConcurrentLinkedQueue<>();
 
     public CursednessServer(MinecraftServer server) {
         this.server = server;
+        this.icConfig = AutoConfig.getConfigHolder(IC_Config.class).getConfig();
     }
 
-    public void start() {
-        ImmersiveCursedness.LOGGER.info("Starting immersive cursedness thread");
+    @Override
+    public void run() {
+        ImmersiveCursedness.LOGGER.info("Starting Immersive Cursedness thread");
         while (isServerActive) {
             long currentTime = System.currentTimeMillis();
             if (currentTime < nextTick) {
                 try {
-                    Thread.sleep(nextTick-currentTime);
+                    //noinspection BusyWait
+                    Thread.sleep(Math.max(1, nextTick - currentTime));
                 } catch (InterruptedException ignored) {}
                 continue;
             }
+
             try {
                 tick();
-                tickCount++;
-            } catch (ConcurrentModificationException ignored) {
             } catch (Exception e) {
-                ImmersiveCursedness.LOGGER.warn("Exception occurred whilst ticking the immersive cursedness thread. This is probably not bad unless it's spamming your console");
-                e.printStackTrace();
+                ImmersiveCursedness.LOGGER.warn("Exception occurred whilst ticking the Immersive Cursedness thread. This is probably not bad unless it's spamming your console", e);
             }
-            nextTick = System.currentTimeMillis()+50;
+
+            nextTick = System.currentTimeMillis() + 50; // 20 ticks per second
         }
+        ImmersiveCursedness.LOGGER.info("Immersive Cursedness thread stopped.");
     }
 
     public void stop() {
-        ImmersiveCursedness.LOGGER.info("Stopping immersive cursedness thread");
         isServerActive = false;
     }
 
-    public void tick() {
-        //Sync player managers
-        List<ServerPlayerEntity> playerList = server.getPlayerManager().getPlayerList();
+    private void tick() {
+        tickCount++;
+        syncPlayerManagers();
 
-        playerManagers.entrySet().removeIf(i -> !playerList.contains(i.getKey()));
-        for (ServerPlayerEntity player : playerList) {
-            if (!playerManagers.containsKey(player)) {
-                playerManagers.put(player, new PlayerManager(player, icconfig));
+        // Tick player managers in parallel
+        playerManagers.forEach((player, manager) -> {
+            try {
+                manager.tick(tickCount);
+            } catch (Exception e) {
+                ImmersiveCursedness.LOGGER.error("Failed to tick player manager for " + player.getName().getString(), e);
             }
-        }
-
-        //Tick player managers
-        playerManagers.forEach((player, manager) -> manager.tick(tickCount));
+        });
     }
 
+    private void syncPlayerManagers() {
+        List<ServerPlayerEntity> playerList = server.getPlayerManager().getPlayerList();
+
+        // Remove managers for players who have logged off
+        playerManagers.keySet().removeIf(player -> !playerList.contains(player));
+
+        // Add managers for new players
+        for (ServerPlayerEntity player : playerList) {
+            playerManagers.computeIfAbsent(player, p -> new PlayerManager(p, icConfig, this));
+        }
+    }
+
+    /**
+     * Executes all pending tasks on the main server thread.
+     */
+    public void executeQueuedTasks() {
+        Runnable task;
+        while ((task = taskQueue.poll()) != null) {
+            try {
+                task.run();
+            } catch (Exception e) {
+                ImmersiveCursedness.LOGGER.error("Error executing a queued task.", e);
+            }
+        }
+    }
+
+    /**
+     * Queues a task to be run on the main server thread.
+     */
+    public void addTask(Runnable task) {
+        taskQueue.add(task);
+    }
+
+    @Nullable
     public PlayerManager getManager(ServerPlayerEntity player) {
         return playerManagers.get(player);
     }

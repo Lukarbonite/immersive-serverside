@@ -5,18 +5,15 @@
   "compatibilityLevel": "JAVA_16",
   "mixins": [
     "EntityPositionS2CPacketAccessor",
-    "MixinPlayerEntity",
     "MixinServerPlayerEntity",
     "NetherPortalBlockMixin",
     "PortalForcerMixin",
     "ServerChunkManagerInvoker",
-    "interdimensionalpackets.InventoryDistanceMixin",
     "interdimensionalpackets.MixinInteractionManager",
-    "interdimensionalpackets.PlayerActionC2SMixin",
     "interdimensionalpackets.ServerPlayNetworkHandlerMixin"
   ],
   "client": [
-    "interdimensionalpackets.ClientPlayerActionMixin"
+
   ],
   "injectors": {
     "defaultRequire": 1

@@ -2,11 +2,10 @@ package nl.theepicblock.immersive_cursedness.mixin;
 
 import com.mojang.authlib.GameProfile;
 import me.shedaniel.autoconfig.AutoConfig;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.storage.ReadView; // <-- Import this
-import net.minecraft.storage.WriteView; // <-- Import this
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.storage.ReadView;
+import net.minecraft.storage.WriteView;
 import net.minecraft.world.World;
 import nl.theepicblock.immersive_cursedness.IC_Config;
 import nl.theepicblock.immersive_cursedness.PlayerInterface;
@@ -16,19 +15,25 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@SuppressWarnings("PointlessBooleanExpression")
 @Mixin(ServerPlayerEntity.class)
-public abstract class MixinServerPlayerEntity extends MixinPlayerEntity implements PlayerInterface {
-	public MixinServerPlayerEntity(World world, BlockPos pos, float yaw, GameProfile gameProfile) {
-		super(world, pos, yaw, gameProfile);
-	}
-
+public abstract class MixinServerPlayerEntity extends PlayerEntity implements PlayerInterface {
 	@Unique
 	private volatile boolean isCloseToPortal;
 	@Unique
-	private World unFakedWorld;
-	@Unique
-	private boolean enabled = true;
+	private boolean ic_enabled = true; // Default value
+
+	// The super constructor has changed, so we cannot define our own.
+	// We will inject into the existing constructor if initialization is needed,
+	// but initializing at declaration is sufficient here.
+	public MixinServerPlayerEntity(World world, GameProfile profile) {
+		super(world, profile);
+	}
+
+	@Inject(method = "<init>", at = @At("TAIL"))
+	private void onInit(CallbackInfo ci) {
+		// Initialize based on config when the player is first created.
+		this.ic_enabled = AutoConfig.getConfigHolder(IC_Config.class).getConfig().defaultEnabled;
+	}
 
 	@Override
 	public void immersivecursedness$setCloseToPortal(boolean v) {
@@ -40,45 +45,27 @@ public abstract class MixinServerPlayerEntity extends MixinPlayerEntity implemen
 		return isCloseToPortal;
 	}
 
-	@Override
-	public void immersivecursedness$fakeWorld(World world) {
-		unFakedWorld = this.getWorld();
-		this.setWorld(world);
+	// Correctly target writeCustomData(WriteView) which is inherited from Entity
+	@Inject(method = "writeCustomData(Lnet/minecraft/storage/WriteView;)V", at = @At("RETURN"))
+	public void writeNbt(WriteView view, CallbackInfo ci) {
+		view.putBoolean("immersivecursedness_enabled", ic_enabled);
 	}
 
-	@Override
-	public void immersivecursedness$deFakeWorld() {
-		if (unFakedWorld != null) {
-			setWorld(unFakedWorld);
-			unFakedWorld = null;
-		}
-	}
-
-	@Override
-	public ServerWorld immersivecursedness$getUnfakedWorld() {
-		if (unFakedWorld != null) return (ServerWorld) unFakedWorld;
-		return (ServerWorld) getWorld();
-	}
-
-	@Inject(method = "writeCustomData(Lnet/minecraft/storage/WriteView;)V", at = @At("HEAD"))
-	public void writeInject(WriteView view, CallbackInfo ci) {
-		if (enabled != AutoConfig.getConfigHolder(IC_Config.class).getConfig().defaultEnabled) {
-			view.putBoolean("immersivecursednessenabled", enabled);
-		}
-	}
-
-	@Inject(method = "readCustomData(Lnet/minecraft/storage/ReadView;)V", at = @At("HEAD"))
-	public void readInject(ReadView view, CallbackInfo ci) {
-		enabled = view.getBoolean("immersivecursednessenabled", AutoConfig.getConfigHolder(IC_Config.class).getConfig().defaultEnabled);
+	// Correctly target readCustomData(ReadView) which is inherited from Entity
+	@Inject(method = "readCustomData(Lnet/minecraft/storage/ReadView;)V", at = @At("RETURN"))
+	public void readNbt(ReadView view, CallbackInfo ci) {
+		boolean defaultEnabled = AutoConfig.getConfigHolder(IC_Config.class).getConfig().defaultEnabled;
+		// The getBoolean method with a default value is the safest way to read.
+		this.ic_enabled = view.getBoolean("immersivecursedness_enabled", defaultEnabled);
 	}
 
 	@Override
 	public void immersivecursedness$setEnabled(boolean v) {
-		enabled = v;
+		ic_enabled = v;
 	}
 
 	@Override
 	public boolean immersivecursedness$getEnabled() {
-		return enabled;
+		return ic_enabled;
 	}
 }

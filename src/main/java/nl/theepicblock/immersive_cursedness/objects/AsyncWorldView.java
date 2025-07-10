@@ -3,19 +3,22 @@ package nl.theepicblock.immersive_cursedness.objects;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.fluid.FluidState;
 import net.minecraft.server.world.OptionalChunk;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.chunk.Chunk;
 import nl.theepicblock.immersive_cursedness.Util;
+import org.jetbrains.annotations.Nullable;
 
-import java.util.Optional;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
-public class AsyncWorldView {
-	private final Map<ChunkPos,Chunk> chunkCache = new HashMap<>();
+public class AsyncWorldView implements BlockView {
+	private final Map<ChunkPos, Chunk> chunkCache = new HashMap<>();
 	private final ServerWorld world;
 	private static final BlockState AIR = Blocks.AIR.getDefaultState();
 	private final boolean nonBlocking;
@@ -36,6 +39,7 @@ public class AsyncWorldView {
 		return chunk.getBlockState(pos);
 	}
 
+	@Nullable
 	public BlockEntity getBlockEntity(BlockPos pos) {
 		Chunk chunk = getChunk(pos);
 		if (chunk == null) return null;
@@ -67,5 +71,25 @@ public class AsyncWorldView {
 			this.chunkCache.put(chunkPos, chunk);
 		}
 		return chunk;
+	}
+
+	@Override
+	public int getHeight() {
+		return world.getHeight();
+	}
+
+	@Override
+	public int getBottomY() {
+		return world.getBottomY();
+	}
+
+	@Override
+	public BlockState getBlockState(BlockPos pos) {
+		return getBlock(pos);
+	}
+
+	@Override
+	public FluidState getFluidState(BlockPos pos) {
+		return getBlockState(pos).getFluidState();
 	}
 }

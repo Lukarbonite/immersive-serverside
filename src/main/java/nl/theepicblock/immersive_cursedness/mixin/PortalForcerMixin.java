@@ -1,28 +1,18 @@
 package nl.theepicblock.immersive_cursedness.mixin;
 
-import net.minecraft.block.BlockState;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.dimension.PortalForcer;
-import nl.theepicblock.immersive_cursedness.ImmersiveCursedness;
-import nl.theepicblock.immersive_cursedness.PortalManager;
-import nl.theepicblock.immersive_cursedness.Util;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Redirect;
 
 @Mixin(PortalForcer.class)
 public class PortalForcerMixin {
 	@Shadow @Final private ServerWorld world;
 
-	@Redirect(method = "method_61028", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/world/ServerWorld;getBlockState(Lnet/minecraft/util/math/BlockPos;)Lnet/minecraft/block/BlockState;"))
-	public BlockState lambdaMixin(ServerWorld world, BlockPos p) {
-		if (PortalManager.portalForcerMixinActivate &&
-				Thread.currentThread() == ImmersiveCursedness.cursednessThread) {
-			return Util.getBlockAsync(world, p);
-		}
-		return world.getBlockState(p);
-	}
+	// This mixin is kept for now, but the dangerous flag has been removed.
+	// The logic inside DummyEntity to find a portal target is now expected to be called
+	// from the main server thread, where direct world access is safe.
+	// If future changes move this logic back to the helper thread, a thread-safe
+	// world view (like AsyncWorldView) must be used here instead of direct access.
 }

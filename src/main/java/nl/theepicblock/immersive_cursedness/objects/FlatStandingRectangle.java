@@ -10,7 +10,6 @@ import nl.theepicblock.immersive_cursedness.Util;
 import java.util.function.Consumer;
 
 public class FlatStandingRectangle {
-    //Right is defined as the most positive point in whatever axis this is
     protected final double top,bottom,left,right,other;
     protected final Direction.Axis axis;
 
@@ -105,7 +104,7 @@ public class FlatStandingRectangle {
         int top = (int)Math.round(clamp(this.top-1, world.min(), world.max()));
         int bottom = (int)Math.round(clamp(this.bottom, world.min(), world.max()));
 
-        if (left == right) return;
+        if (left > right || bottom > top) return;
 
         Direction.Axis otherAxis = Util.rotate(axis);
         BlockPos.Mutable mutPos = new BlockPos.Mutable();
@@ -141,9 +140,9 @@ public class FlatStandingRectangle {
 
     private BlockPos createBlockPos(double y, double primaryAxis) {
         if (axis == Direction.Axis.X) {
-            return Util.makeBlockPos(other, y, primaryAxis);
+            return BlockPos.ofFloored(other, y, primaryAxis);
         } else {
-            return Util.makeBlockPos(primaryAxis, y, other);
+            return BlockPos.ofFloored(primaryAxis, y, other);
         }
     }
 
