@@ -102,11 +102,26 @@ public class PlayerManager {
             TransformProfile transformProfile = portal.getTransformProfile();
             if (transformProfile == null) continue;
 
-            if (tickCount % 40 == 0) {
-                BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(pos -> blockUpdatesToSend.put(pos.toImmutable(), Blocks.AIR.getDefaultState()));
-            }
-
             FlatStandingRectangle baseRect = portal.toFlatStandingRectangle();
+            viewRects.add(baseRect); // This ensures the portal blocks themselves, when replaced, aren't purged.
+
+            // Make the portal blocks themselves disappear as soon as the portal is rendered
+            BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
+                // We only want to affect blocks that are actually part of the portal's visible area.
+                // This is important for portals that might not be perfect rectangles (e.g. cutout corners).
+                if (baseRect.contains(portalBlockPos)) {
+                    BlockPos immutablePos = portalBlockPos.toImmutable();
+                    blocksInView.increment(immutablePos);
+
+                    BlockState newState = Blocks.AIR.getDefaultState();
+                    BlockState cachedState = blockCache.get(immutablePos);
+                    if (cachedState == null || !cachedState.equals(newState)) {
+                        blockCache.put(immutablePos, newState);
+                        blockUpdatesToSend.put(immutablePos, newState);
+                    }
+                }
+            });
+
             Vec3d playerEyePos = player.getEyePos();
 
             for (int i = 1; i < icConfig.portalDepth; i++) {
