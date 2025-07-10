@@ -22,6 +22,14 @@ public class FlatStandingRectangle {
         this.axis = axis;
     }
 
+    public Direction.Axis getAxis() {
+        return axis;
+    }
+
+    public double getOther() {
+        return other;
+    }
+
     public Vec3d getBottomRight() {
         return createVec3d(bottom, right);
     }

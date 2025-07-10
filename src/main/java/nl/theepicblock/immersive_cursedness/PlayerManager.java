@@ -102,17 +102,13 @@ public class PlayerManager {
             TransformProfile transformProfile = portal.getTransformProfile();
             if (transformProfile == null) continue;
 
-            FlatStandingRectangle baseRect = portal.toFlatStandingRectangle();
-            viewRects.add(baseRect); // This ensures the portal blocks themselves, when replaced, aren't purged.
+            FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
+            viewRects.add(portalRect);
 
-            // Make the portal blocks themselves disappear as soon as the portal is rendered
             BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
-                // We only want to affect blocks that are actually part of the portal's visible area.
-                // This is important for portals that might not be perfect rectangles (e.g. cutout corners).
-                if (baseRect.contains(portalBlockPos)) {
+                if (portalRect.contains(portalBlockPos)) {
                     BlockPos immutablePos = portalBlockPos.toImmutable();
                     blocksInView.increment(immutablePos);
-
                     BlockState newState = Blocks.AIR.getDefaultState();
                     BlockState cachedState = blockCache.get(immutablePos);
                     if (cachedState == null || !cachedState.equals(newState)) {
@@ -123,18 +119,30 @@ public class PlayerManager {
             });
 
             Vec3d playerEyePos = player.getEyePos();
+            double playerCoordinateOnAxis = Util.get(playerEyePos, portalRect.getAxis());
+            double portalCoordinateOnAxis = portalRect.getOther();
 
             for (int i = 1; i < icConfig.portalDepth; i++) {
-                FlatStandingRectangle layerRect = baseRect.expand(i, playerEyePos);
-                viewRects.add(layerRect);
+                FlatStandingRectangle positiveSideLayer = portalRect.expandAbsolute(portalCoordinateOnAxis + i, playerEyePos);
+                FlatStandingRectangle negativeSideLayer = portalRect.expandAbsolute(portalCoordinateOnAxis - i, playerEyePos);
+
+                viewRects.add(positiveSideLayer);
+                viewRects.add(negativeSideLayer);
+
+                FlatStandingRectangle layerToRender;
+                if (playerCoordinateOnAxis > portalCoordinateOnAxis) {
+                    layerToRender = negativeSideLayer;
+                } else {
+                    layerToRender = positiveSideLayer;
+                }
 
                 for (Entity entity : this.nearbyEntities) {
-                    if (layerRect.contains(entity.getPos())) {
+                    if (layerToRender.contains(entity.getPos())) {
                         entitiesInCullingZone.add(entity.getUuid());
                     }
                 }
 
-                layerRect.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
+                layerToRender.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
                     double distSq = Util.getDistance(pos, portal.getLowerLeft());
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) return;
 
@@ -222,8 +230,6 @@ public class PlayerManager {
             }
 
             for (Entity entity : entitiesToShow) {
-                // It's important to use the ServerWorld from the player's current context
-                // when creating the tracker entry, to ensure it has the correct state.
                 EntityTrackerEntry entry = new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {});
                 entry.sendPackets(player, player.networkHandler::sendPacket);
             }
@@ -284,7 +290,6 @@ public class PlayerManager {
         return world.getEntitiesByType(
                 TypeFilter.instanceOf(Entity.class),
                 player.getBoundingBox().expand(range),
-                // Allow all entities except the player themselves
                 (entity) -> !entity.equals(this.player) && entity.isAlive()
         );
     }
