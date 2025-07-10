@@ -32,8 +32,8 @@ public class PlayerManager {
     private final PortalManager portalManager;
     private final BlockCache blockCache = new BlockCache();
     private final Set<UUID> hiddenEntities = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, Integer> unhideGracePeriod = new ConcurrentHashMap<>();
-    private static final int GRACE_PERIOD_TICKS = 2;
+    private final Map<UUID, Integer> flickerGuard = new ConcurrentHashMap<>();
+    private static final int FLICKER_GUARD_TICKS = 5;
 
     private AsyncWorldView sourceView;
     private AsyncWorldView destinationView;
@@ -51,8 +51,9 @@ public class PlayerManager {
             return;
         }
 
-        // Decrement grace period counters
-        unhideGracePeriod.replaceAll((k, v) -> v - 1);
+        // Tick down the flicker guard timers
+        flickerGuard.replaceAll((k, v) -> v - 1);
+        flickerGuard.entrySet().removeIf(entry -> entry.getValue() <= 0);
 
         ServerWorld sourceWorld = player.getWorld();
         ServerWorld destinationWorld = Util.getDestination(sourceWorld);
@@ -161,7 +162,7 @@ public class PlayerManager {
             }
         });
 
-        // --- Entity Culling Logic with Grace Period ---
+        // --- Entity Culling Logic with Flicker Guard ---
         List<Entity> entitiesToHide = new ArrayList<>();
         List<Entity> entitiesToShow = new ArrayList<>();
 
@@ -169,24 +170,18 @@ public class PlayerManager {
             UUID uuid = entity.getUuid();
             boolean shouldBeHidden = entitiesInCullingZone.contains(uuid);
             boolean isCurrentlyHidden = hiddenEntities.contains(uuid);
+            boolean isFlickerGuarded = flickerGuard.containsKey(uuid);
 
             if (shouldBeHidden) {
-                // Entity should be hidden.
-                unhideGracePeriod.remove(uuid); // Cancel any un-hide grace period.
-                if (!isCurrentlyHidden) {
-                    // It wasn't hidden before, so hide it now.
+                if (!isCurrentlyHidden && !isFlickerGuarded) {
                     entitiesToHide.add(entity);
                     hiddenEntities.add(uuid);
                 }
-            } else { // Entity should NOT be hidden.
+            } else { // should NOT be hidden
                 if (isCurrentlyHidden) {
-                    // It's hidden, but shouldn't be. Check grace period.
-                    unhideGracePeriod.putIfAbsent(uuid, GRACE_PERIOD_TICKS);
-                    if (unhideGracePeriod.get(uuid) <= 0) {
-                        entitiesToShow.add(entity);
-                        hiddenEntities.remove(uuid);
-                        unhideGracePeriod.remove(uuid);
-                    }
+                    entitiesToShow.add(entity);
+                    hiddenEntities.remove(uuid);
+                    flickerGuard.put(uuid, FLICKER_GUARD_TICKS); // Apply flicker guard
                 }
             }
         }
@@ -194,7 +189,7 @@ public class PlayerManager {
         // Cleanup for despawned or out-of-range entities
         Set<UUID> allInRangeUuids = allEntitiesInRange.stream().map(Entity::getUuid).collect(Collectors.toSet());
         hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
-        unhideGracePeriod.keySet().removeIf(uuid -> !allInRangeUuids.contains(uuid));
+        flickerGuard.keySet().removeIf(uuid -> !allInRangeUuids.contains(uuid));
 
         cursednessServer.addTask(() -> {
             if (!player.networkHandler.isConnectionOpen()) return;
@@ -253,7 +248,7 @@ public class PlayerManager {
             }
             hiddenEntities.clear();
         }
-        unhideGracePeriod.clear();
+        flickerGuard.clear();
 
         cursednessServer.addTask(() -> {
             if (!player.networkHandler.isConnectionOpen()) return;
