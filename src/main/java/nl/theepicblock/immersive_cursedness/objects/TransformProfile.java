@@ -31,6 +31,12 @@ public class TransformProfile {
         this.rotation = rotation;
     }
 
+    // START: This method is required
+    public BlockPos getTargetPos() {
+        return new BlockPos(targetX, targetY, targetZ);
+    }
+    // END: This method is required
+
     public int transformYOnly(int y) {
         return y-originalY+targetY;
     }

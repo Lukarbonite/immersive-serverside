@@ -3,6 +3,7 @@ package nl.theepicblock.immersive_cursedness;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.NetherPortalBlock;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ChunkTicketType;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.*;
 import net.minecraft.world.TeleportTarget;
@@ -39,6 +40,13 @@ public class PortalManager {
         portalGracePeriods.entrySet().removeIf(entry -> {
             boolean expired = entry.getValue() <= 0;
             if (expired) {
+                // When a portal expires, we should also release the chunk ticket
+                TransformProfile profile = transformProfileCache.get(entry.getKey());
+                if (profile != null) {
+                    BlockPos targetPos = profile.getTargetPos();
+                    // CORRECTED: removeTicket only takes 3 arguments
+                    destination.getChunkManager().removeTicket(ChunkTicketType.PORTAL, new ChunkPos(targetPos), 3);
+                }
                 portals.remove(entry.getKey());
                 transformProfileCache.remove(entry.getKey());
             }
@@ -82,6 +90,19 @@ public class PortalManager {
             BlockPos portalKey = Util.getCanonicalPos(currentPortalBlocks);
             portalGracePeriods.put(portalKey, GRACE_PERIOD_TICKS);
 
+            // Get or create the transformation profile.
+            TransformProfile transformProfile = transformProfileCache.computeIfAbsent(portalKey, k -> createTransformProfile(k, destination));
+
+            if (transformProfile == null) {
+                ImmersiveCursedness.LOGGER.warn("Could not create a valid teleport target for portal at " + portalKey);
+                continue;
+            }
+
+            // The corrected chunk ticket logic:
+            BlockPos targetPos = transformProfile.getTargetPos();
+            // CORRECTED: addTicket only takes 3 arguments
+            destination.getChunkManager().addTicket(ChunkTicketType.PORTAL, new ChunkPos(targetPos), 3);
+
             if (!portals.containsKey(portalKey)) {
                 BlockState startBlockState = worldView.getBlock(startPos);
                 if (!startBlockState.contains(NetherPortalBlock.AXIS)) continue;
@@ -90,12 +111,6 @@ public class PortalManager {
                 BlockBox bounds = Util.getBoundingBox(currentPortalBlocks);
                 BlockPos upperRight = new BlockPos(bounds.getMaxX(), bounds.getMaxY(), bounds.getMaxZ());
                 BlockPos lowerLeft = new BlockPos(bounds.getMinX(), bounds.getMinY(), bounds.getMinZ());
-
-                TransformProfile transformProfile = transformProfileCache.computeIfAbsent(portalKey, k -> createTransformProfile(k, destination));
-                if (transformProfile == null) {
-                    ImmersiveCursedness.LOGGER.warn("Could not create a valid teleport target for portal at " + portalKey);
-                    continue;
-                }
 
                 boolean hasCorners = hasCorners(worldView, upperRight, lowerLeft, axis);
                 portals.put(portalKey, new Portal(upperRight, lowerLeft, axis, hasCorners, transformProfile));
