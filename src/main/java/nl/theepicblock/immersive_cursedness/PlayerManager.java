@@ -17,8 +17,12 @@ import nl.theepicblock.immersive_cursedness.objects.*;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public class PlayerManager {
@@ -27,7 +31,9 @@ public class PlayerManager {
     private final CursednessServer cursednessServer;
     private final PortalManager portalManager;
     private final BlockCache blockCache = new BlockCache();
-    private final List<UUID> hiddenEntities = new ArrayList<>();
+    private final Set<UUID> hiddenEntities = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Integer> unhideGracePeriod = new ConcurrentHashMap<>();
+    private static final int GRACE_PERIOD_TICKS = 2;
 
     private AsyncWorldView sourceView;
     private AsyncWorldView destinationView;
@@ -44,6 +50,9 @@ public class PlayerManager {
         if (!((PlayerInterface) player).immersivecursedness$getEnabled() || player.isSleeping()) {
             return;
         }
+
+        // Decrement grace period counters
+        unhideGracePeriod.replaceAll((k, v) -> v - 1);
 
         ServerWorld sourceWorld = player.getWorld();
         ServerWorld destinationWorld = Util.getDestination(sourceWorld);
@@ -70,9 +79,8 @@ public class PlayerManager {
         BlockUpdateMap blockUpdatesToSend = new BlockUpdateMap();
         List<Packet<?>> packetList = new ArrayList<>();
 
-        List<Entity> visibleEntities = getEntitiesInRange(sourceWorld);
-        List<Entity> entitiesToHide = new ArrayList<>();
-        List<Entity> entitiesToShow = new ArrayList<>();
+        List<Entity> allEntitiesInRange = getEntitiesInRange(sourceWorld);
+        Set<UUID> entitiesInCullingZone = new HashSet<>();
 
         BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
         BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
@@ -99,11 +107,9 @@ public class PlayerManager {
                 FlatStandingRectangle layerRect = baseRect.expand(i, playerEyePos);
                 viewRects.add(layerRect);
 
-                for (Entity entity : visibleEntities) {
+                for (Entity entity : allEntitiesInRange) {
                     if (layerRect.contains(entity.getPos())) {
-                        if (!hiddenEntities.contains(entity.getUuid())) {
-                            entitiesToHide.add(entity);
-                        }
+                        entitiesInCullingZone.add(entity.getUuid());
                     }
                 }
 
@@ -155,19 +161,40 @@ public class PlayerManager {
             }
         });
 
-        List<UUID> entitiesToHideUuids = entitiesToHide.stream().map(Entity::getUuid).collect(Collectors.toList());
-        List<UUID> allVisibleEntitiesUUIDs = visibleEntities.stream().map(Entity::getUuid).collect(Collectors.toList());
+        // --- Entity Culling Logic with Grace Period ---
+        List<Entity> entitiesToHide = new ArrayList<>();
+        List<Entity> entitiesToShow = new ArrayList<>();
 
-        hiddenEntities.removeIf(uuid -> {
-            boolean shouldBeVisible = allVisibleEntitiesUUIDs.contains(uuid) && !entitiesToHideUuids.contains(uuid);
-            if (shouldBeVisible) {
-                Entity entity = sourceWorld.getEntity(uuid);
-                if (entity != null) entitiesToShow.add(entity);
+        for (Entity entity : allEntitiesInRange) {
+            UUID uuid = entity.getUuid();
+            boolean shouldBeHidden = entitiesInCullingZone.contains(uuid);
+            boolean isCurrentlyHidden = hiddenEntities.contains(uuid);
+
+            if (shouldBeHidden) {
+                // Entity should be hidden.
+                unhideGracePeriod.remove(uuid); // Cancel any un-hide grace period.
+                if (!isCurrentlyHidden) {
+                    // It wasn't hidden before, so hide it now.
+                    entitiesToHide.add(entity);
+                    hiddenEntities.add(uuid);
+                }
+            } else { // Entity should NOT be hidden.
+                if (isCurrentlyHidden) {
+                    // It's hidden, but shouldn't be. Check grace period.
+                    unhideGracePeriod.putIfAbsent(uuid, GRACE_PERIOD_TICKS);
+                    if (unhideGracePeriod.get(uuid) <= 0) {
+                        entitiesToShow.add(entity);
+                        hiddenEntities.remove(uuid);
+                        unhideGracePeriod.remove(uuid);
+                    }
+                }
             }
-            return shouldBeVisible || !allVisibleEntitiesUUIDs.contains(uuid);
-        });
+        }
 
-        hiddenEntities.addAll(entitiesToHideUuids);
+        // Cleanup for despawned or out-of-range entities
+        Set<UUID> allInRangeUuids = allEntitiesInRange.stream().map(Entity::getUuid).collect(Collectors.toSet());
+        hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
+        unhideGracePeriod.keySet().removeIf(uuid -> !allInRangeUuids.contains(uuid));
 
         cursednessServer.addTask(() -> {
             if (!player.networkHandler.isConnectionOpen()) return;
@@ -182,8 +209,6 @@ public class PlayerManager {
             }
 
             for (Entity entity : entitiesToShow) {
-                // The correct constructor for a generic entity spawn packet uses this longer form.
-                // entity.createSpawnPacket() cannot be used here as it requires an EntityTrackerEntry.
                 player.networkHandler.sendPacket(
                         new EntitySpawnS2CPacket(
                                 entity.getId(),
@@ -194,7 +219,7 @@ public class PlayerManager {
                                 entity.getPitch(),
                                 entity.getYaw(),
                                 entity.getType(),
-                                0, // Entity data, often 0 for non-projectiles
+                                0,
                                 entity.getVelocity(),
                                 entity.getHeadYaw()
                         )
@@ -217,9 +242,40 @@ public class PlayerManager {
             }
         });
 
+        List<Entity> entitiesToShow = new ArrayList<>();
+        if (!hiddenEntities.isEmpty()) {
+            ServerWorld sourceWorld = player.getWorld();
+            for (UUID uuid : hiddenEntities) {
+                Entity entity = sourceWorld.getEntity(uuid);
+                if (entity != null) {
+                    entitiesToShow.add(entity);
+                }
+            }
+            hiddenEntities.clear();
+        }
+        unhideGracePeriod.clear();
+
         cursednessServer.addTask(() -> {
-            if (player.networkHandler.isConnectionOpen()) {
-                updatesToSend.sendTo(player);
+            if (!player.networkHandler.isConnectionOpen()) return;
+
+            updatesToSend.sendTo(player);
+
+            for (Entity entity : entitiesToShow) {
+                player.networkHandler.sendPacket(
+                        new EntitySpawnS2CPacket(
+                                entity.getId(),
+                                entity.getUuid(),
+                                entity.getX(),
+                                entity.getY(),
+                                entity.getZ(),
+                                entity.getPitch(),
+                                entity.getYaw(),
+                                entity.getType(),
+                                0,
+                                entity.getVelocity(),
+                                entity.getHeadYaw()
+                        )
+                );
             }
         });
     }
