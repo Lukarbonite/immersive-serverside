@@ -32,6 +32,10 @@ public class AsyncWorldView implements BlockView {
 		this.nonBlocking = nonBlocking;
 	}
 
+	public ServerWorld getWorld() {
+		return this.world;
+	}
+
 	public BlockState getBlock(BlockPos pos) {
 		Chunk chunk = getChunk(pos);
 		if (chunk == null) return AIR;

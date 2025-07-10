@@ -34,6 +34,11 @@ public class PlayerManager {
     private AsyncWorldView destinationView;
     private ServerWorld currentSourceWorld;
 
+    // Data prepared on the main thread
+    private List<Entity> nearbyEntities = new ArrayList<>();
+    private Collection<Portal> portalsToProcess = new ArrayList<>();
+
+
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, CursednessServer cursednessServer) {
         this.player = player;
         this.icConfig = icConfig;
@@ -41,29 +46,36 @@ public class PlayerManager {
         this.portalManager = new PortalManager(player, icConfig);
     }
 
-    public void tick(int tickCount) {
-        if (!((PlayerInterface) player).immersivecursedness$getEnabled() || player.isSleeping()) {
-            return;
-        }
-
-        // Tick down the flicker guard timers
-        flickerGuard.replaceAll((k, v) -> v - 1);
-        flickerGuard.entrySet().removeIf(entry -> entry.getValue() <= 0);
-
+    public void tickMainThread(int tickCount) {
         ServerWorld sourceWorld = player.getWorld();
-        ServerWorld destinationWorld = Util.getDestination(sourceWorld);
 
+        // Update async world views if world changed
         boolean worldChanged = sourceWorld != this.currentSourceWorld;
         if (worldChanged || this.sourceView == null || this.destinationView == null) {
             this.currentSourceWorld = sourceWorld;
             this.sourceView = new AsyncWorldView(sourceWorld, true);
-            this.destinationView = new AsyncWorldView(destinationWorld, true);
-            purgeCache();
+            this.destinationView = new AsyncWorldView(Util.getDestination(sourceWorld), true);
+            purgeCache(); // This is safe, it queues a task
         }
 
+        // Safely update portal list and entity list from the main thread
         if (tickCount % 30 == 0 || worldChanged) {
             portalManager.update(sourceView);
         }
+        this.portalsToProcess = portalManager.getPortals();
+        this.nearbyEntities = getEntitiesInRange(sourceWorld);
+    }
+
+    public void tickAsync(int tickCount) {
+        if (!((PlayerInterface) player).immersivecursedness$getEnabled() || player.isSleeping()) {
+            return;
+        }
+
+        flickerGuard.replaceAll((k, v) -> v - 1);
+        flickerGuard.entrySet().removeIf(entry -> entry.getValue() <= 0);
+
+        ServerWorld sourceWorld = this.currentSourceWorld;
+        if (sourceWorld == null) return; // Not ready yet
 
         if (player.hasPortalCooldown()) {
             ((PlayerInterface) player).immersivecursedness$setCloseToPortal(false);
@@ -74,8 +86,6 @@ public class PlayerManager {
         Chunk2IntMap blocksInView = new Chunk2IntMap();
         BlockUpdateMap blockUpdatesToSend = new BlockUpdateMap();
         List<Packet<?>> packetList = new ArrayList<>();
-
-        List<Entity> allEntitiesInRange = getEntitiesInRange(sourceWorld);
         Set<UUID> entitiesInCullingZone = new HashSet<>();
 
         BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
@@ -84,7 +94,7 @@ public class PlayerManager {
         boolean isNearPortal = false;
         var bottomOfWorld = sourceWorld.getBottomY();
 
-        for (Portal portal : portalManager.getPortals()) {
+        for (Portal portal : this.portalsToProcess) {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
             }
@@ -92,7 +102,7 @@ public class PlayerManager {
             TransformProfile transformProfile = portal.getTransformProfile();
             if (transformProfile == null) continue;
 
-            if (tickCount % 40 == 0 || worldChanged) {
+            if (tickCount % 40 == 0) {
                 BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(pos -> blockUpdatesToSend.put(pos.toImmutable(), Blocks.AIR.getDefaultState()));
             }
 
@@ -103,13 +113,13 @@ public class PlayerManager {
                 FlatStandingRectangle layerRect = baseRect.expand(i, playerEyePos);
                 viewRects.add(layerRect);
 
-                for (Entity entity : allEntitiesInRange) {
+                for (Entity entity : this.nearbyEntities) {
                     if (layerRect.contains(entity.getPos())) {
                         entitiesInCullingZone.add(entity.getUuid());
                     }
                 }
 
-                layerRect.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationWorld, transformProfile), (pos) -> {
+                layerRect.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
                     double distSq = Util.getDistance(pos, portal.getLowerLeft());
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) return;
 
@@ -157,11 +167,10 @@ public class PlayerManager {
             }
         });
 
-        // --- Entity Culling Logic with Flicker Guard ---
         List<Entity> entitiesToHide = new ArrayList<>();
         List<Entity> entitiesToShow = new ArrayList<>();
 
-        for (Entity entity : allEntitiesInRange) {
+        for (Entity entity : this.nearbyEntities) {
             UUID uuid = entity.getUuid();
             boolean shouldBeHidden = entitiesInCullingZone.contains(uuid);
             boolean isCurrentlyHidden = hiddenEntities.contains(uuid);
@@ -172,17 +181,16 @@ public class PlayerManager {
                     entitiesToHide.add(entity);
                     hiddenEntities.add(uuid);
                 }
-            } else { // should NOT be hidden
+            } else {
                 if (isCurrentlyHidden) {
                     entitiesToShow.add(entity);
                     hiddenEntities.remove(uuid);
-                    flickerGuard.put(uuid, FLICKER_GUARD_TICKS); // Apply flicker guard
+                    flickerGuard.put(uuid, FLICKER_GUARD_TICKS);
                 }
             }
         }
 
-        // Cleanup for despawned or out-of-range entities
-        Set<UUID> allInRangeUuids = allEntitiesInRange.stream().map(Entity::getUuid).collect(Collectors.toSet());
+        Set<UUID> allInRangeUuids = this.nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
         hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
         flickerGuard.keySet().removeIf(uuid -> !allInRangeUuids.contains(uuid));
 
@@ -246,7 +254,7 @@ public class PlayerManager {
 
     @Nullable
     public TransformProfile getTransformProfileForBlock(BlockPos p) {
-        for (Portal portal : portalManager.getPortals()) {
+        for (Portal portal : this.portalsToProcess) {
             if (portal.getTransformProfile() != null && portal.isBlockposBehind(p, player.getEyePos())) {
                 return portal.getTransformProfile();
             }

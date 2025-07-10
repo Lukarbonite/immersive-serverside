@@ -43,6 +43,7 @@ public class ImmersiveCursedness implements ModInitializer {
         // This is the key to thread safety: run all world-mutating logic on the main server thread.
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             if (cursednessServer != null) {
+                cursednessServer.tickMainThread();
                 cursednessServer.executeQueuedTasks();
             }
         });

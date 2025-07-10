@@ -40,7 +40,7 @@ public class CursednessServer implements Runnable {
             }
 
             try {
-                tick();
+                tickAsync();
             } catch (Exception e) {
                 ImmersiveCursedness.LOGGER.warn("Exception occurred whilst ticking the Immersive Cursedness thread. This is probably not bad unless it's spamming your console", e);
             }
@@ -54,16 +54,26 @@ public class CursednessServer implements Runnable {
         isServerActive = false;
     }
 
-    private void tick() {
+    private void tickAsync() {
         tickCount++;
-        syncPlayerManagers();
-
-        // Tick player managers in parallel
+        // Tick player managers in parallel on the helper thread
         playerManagers.forEach((player, manager) -> {
             try {
-                manager.tick(tickCount);
+                manager.tickAsync(tickCount);
             } catch (Exception e) {
                 ImmersiveCursedness.LOGGER.error("Failed to tick player manager for " + player.getName().getString(), e);
+            }
+        });
+    }
+
+    public void tickMainThread() {
+        // Sync player list and prepare data for the async thread, all on the main server thread
+        syncPlayerManagers();
+        playerManagers.forEach((player, manager) -> {
+            try {
+                manager.tickMainThread(tickCount);
+            } catch (Exception e) {
+                ImmersiveCursedness.LOGGER.error("Failed to prepare tick for player manager for " + player.getName().getString(), e);
             }
         });
     }
