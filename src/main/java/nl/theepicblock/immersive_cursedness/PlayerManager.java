@@ -222,7 +222,9 @@ public class PlayerManager {
             }
 
             for (Entity entity : entitiesToShow) {
-                EntityTrackerEntry entry = new EntityTrackerEntry(sourceWorld, entity, 0, false, (p) -> {}, (p, l) -> {});
+                // It's important to use the ServerWorld from the player's current context
+                // when creating the tracker entry, to ensure it has the correct state.
+                EntityTrackerEntry entry = new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {});
                 entry.sendPackets(player, player.networkHandler::sendPacket);
             }
         });
@@ -282,7 +284,8 @@ public class PlayerManager {
         return world.getEntitiesByType(
                 TypeFilter.instanceOf(Entity.class),
                 player.getBoundingBox().expand(range),
-                (entity) -> !entity.isPlayer() && entity.isAlive()
+                // Allow all entities except the player themselves
+                (entity) -> !entity.equals(this.player) && entity.isAlive()
         );
     }
 }
