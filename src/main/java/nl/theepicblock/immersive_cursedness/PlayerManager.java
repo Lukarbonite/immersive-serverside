@@ -5,7 +5,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.network.packet.Packet;
-import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
+import net.minecraft.server.network.EntityTrackerEntry;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.TypeFilter;
@@ -16,12 +16,7 @@ import net.minecraft.world.World;
 import nl.theepicblock.immersive_cursedness.objects.*;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -204,21 +199,8 @@ public class PlayerManager {
             }
 
             for (Entity entity : entitiesToShow) {
-                player.networkHandler.sendPacket(
-                        new EntitySpawnS2CPacket(
-                                entity.getId(),
-                                entity.getUuid(),
-                                entity.getX(),
-                                entity.getY(),
-                                entity.getZ(),
-                                entity.getPitch(),
-                                entity.getYaw(),
-                                entity.getType(),
-                                0,
-                                entity.getVelocity(),
-                                entity.getHeadYaw()
-                        )
-                );
+                EntityTrackerEntry entry = new EntityTrackerEntry(sourceWorld, entity, 0, false, (p) -> {}, (p, l) -> {});
+                entry.sendPackets(player, player.networkHandler::sendPacket);
             }
         });
     }
@@ -256,21 +238,8 @@ public class PlayerManager {
             updatesToSend.sendTo(player);
 
             for (Entity entity : entitiesToShow) {
-                player.networkHandler.sendPacket(
-                        new EntitySpawnS2CPacket(
-                                entity.getId(),
-                                entity.getUuid(),
-                                entity.getX(),
-                                entity.getY(),
-                                entity.getZ(),
-                                entity.getPitch(),
-                                entity.getYaw(),
-                                entity.getType(),
-                                0,
-                                entity.getVelocity(),
-                                entity.getHeadYaw()
-                        )
-                );
+                EntityTrackerEntry entry = new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {});
+                entry.sendPackets(player, player.networkHandler::sendPacket);
             }
         });
     }
