@@ -75,11 +75,12 @@ public class PlayerManager {
         if (tickCount % 30 == 0 || worldChanged) {
             portalManager.update(sourceView);
         }
-        this.portalsToProcess = portalManager.getPortals();
+        // Create snapshots for the async thread
+        this.portalsToProcess = new ArrayList<>(portalManager.getPortals());
         this.nearbyEntities = getEntitiesInRange(sourceWorld);
 
-        // Fetch entities from destination world near portal exits
-        this.destinationEntities.clear();
+        // Fetch entities from destination world near portal exits and create a new list
+        List<Entity> newDestinationEntities = new ArrayList<>();
         if (this.destinationView != null && !this.portalsToProcess.isEmpty()) {
             ServerWorld destWorld = this.destinationView.getWorld();
             Set<UUID> addedUuids = new HashSet<>();
@@ -92,12 +93,13 @@ public class PlayerManager {
                             )
                             .forEach(entity -> {
                                 if (addedUuids.add(entity.getUuid())) {
-                                    destinationEntities.add(entity);
+                                    newDestinationEntities.add(entity);
                                 }
                             });
                 }
             }
         }
+        this.destinationEntities = newDestinationEntities; // Atomically replace the list
     }
 
     public void tickAsync(int tickCount) {
