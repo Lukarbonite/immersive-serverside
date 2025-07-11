@@ -4,13 +4,17 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.data.DataTracker;
+import net.minecraft.entity.player.PlayerPosition;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.s2c.play.*;
 import net.minecraft.server.network.EntityTrackerEntry;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.TypeFilter;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import nl.theepicblock.immersive_cursedness.objects.*;
@@ -28,6 +32,14 @@ public class PlayerManager {
     private final BlockCache blockCache = new BlockCache();
     private final Set<UUID> hiddenEntities = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> flickerGuard = new ConcurrentHashMap<>();
+
+    // For fake entities
+    private final Map<UUID, Integer> realToFakeId = new ConcurrentHashMap<>();
+    private final Map<Integer, UUID> fakeToRealId = new ConcurrentHashMap<>();
+    private final Set<UUID> shownFakeEntities = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Integer> fakeEntityFlickerGuard = new ConcurrentHashMap<>();
+    private int nextFakeEntityId = -1000000;
+
     private static final int FLICKER_GUARD_TICKS = 5;
 
     private AsyncWorldView sourceView;
@@ -36,6 +48,7 @@ public class PlayerManager {
 
     // Data prepared on the main thread
     private List<Entity> nearbyEntities = new ArrayList<>();
+    private List<Entity> destinationEntities = new ArrayList<>();
     private Collection<Portal> portalsToProcess = new ArrayList<>();
 
 
@@ -64,6 +77,27 @@ public class PlayerManager {
         }
         this.portalsToProcess = portalManager.getPortals();
         this.nearbyEntities = getEntitiesInRange(sourceWorld);
+
+        // Fetch entities from destination world near portal exits
+        this.destinationEntities.clear();
+        if (this.destinationView != null && !this.portalsToProcess.isEmpty()) {
+            ServerWorld destWorld = this.destinationView.getWorld();
+            Set<UUID> addedUuids = new HashSet<>();
+            for (Portal portal : this.portalsToProcess) {
+                TransformProfile profile = portal.getTransformProfile();
+                if (profile != null) {
+                    Box destBox = new Box(profile.getTargetPos()).expand(icConfig.horizontalSendLimit + 20);
+                    destWorld.getEntitiesByType(TypeFilter.instanceOf(Entity.class), destBox, (entity) ->
+                                    entity.isAlive() && !entity.getUuid().equals(player.getUuid()) && entity.shouldSave()
+                            )
+                            .forEach(entity -> {
+                                if (addedUuids.add(entity.getUuid())) {
+                                    destinationEntities.add(entity);
+                                }
+                            });
+                }
+            }
+        }
     }
 
     public void tickAsync(int tickCount) {
@@ -73,6 +107,8 @@ public class PlayerManager {
 
         flickerGuard.replaceAll((k, v) -> v - 1);
         flickerGuard.entrySet().removeIf(entry -> entry.getValue() <= 0);
+        fakeEntityFlickerGuard.replaceAll((k, v) -> v - 1);
+        fakeEntityFlickerGuard.entrySet().removeIf(entry -> entry.getValue() <= 0);
 
         ServerWorld sourceWorld = this.currentSourceWorld;
         if (sourceWorld == null) return; // Not ready yet
@@ -143,7 +179,7 @@ public class PlayerManager {
                 }
 
                 layerToRender.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
-                    double distSq = Util.getDistance(pos, portal.getLowerLeft());
+                    double distSq = portal.getDistance(pos);
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) return;
 
                     BlockState newState;
@@ -213,6 +249,82 @@ public class PlayerManager {
             }
         }
 
+        // Handle fake entities
+        Set<UUID> fakeEntitiesInView = new HashSet<>();
+        Map<UUID, Packet<?>> fakeEntitySpawnPackets = new HashMap<>();
+        Map<UUID, List<Packet<?>>> fakeEntityUpdatePackets = new HashMap<>();
+
+        for (Entity realEntity : this.destinationEntities) {
+            for (Portal portal : this.portalsToProcess) {
+                TransformProfile transformProfile = portal.getTransformProfile();
+                Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
+
+                boolean isVisible = false;
+                for (FlatStandingRectangle rect : viewRects) {
+                    if (rect.contains(fakePos)) {
+                        isVisible = true;
+                        break;
+                    }
+                }
+
+                if (isVisible) {
+                    fakeEntitiesInView.add(realEntity.getUuid());
+                    int fakeId = realToFakeId.computeIfAbsent(realEntity.getUuid(), k -> {
+                        int newId = nextFakeEntityId--;
+                        fakeToRealId.put(newId, k);
+                        return newId;
+                    });
+                    float fakeYaw = transformProfile.untransformYaw(realEntity.getYaw());
+                    float fakeHeadYaw = transformProfile.untransformYaw(realEntity.getHeadYaw());
+
+                    EntitySpawnS2CPacket spawnPacket = new EntitySpawnS2CPacket(
+                            fakeId, realEntity.getUuid(), fakePos.x, fakePos.y, fakePos.z,
+                            realEntity.getPitch(), fakeYaw, realEntity.getType(), 0,
+                            transformProfile.untransform(realEntity.getVelocity()), fakeHeadYaw
+                    );
+                    fakeEntitySpawnPackets.put(realEntity.getUuid(), spawnPacket);
+
+                    List<Packet<?>> updates = new ArrayList<>();
+                    PlayerPosition playerPos = new PlayerPosition(fakePos, Vec3d.ZERO, fakeYaw, realEntity.getPitch());
+                    updates.add(new EntityPositionS2CPacket(fakeId, playerPos, Collections.emptySet(), realEntity.isOnGround()));
+                    updates.add(new EntityVelocityUpdateS2CPacket(fakeId, transformProfile.untransform(realEntity.getVelocity())));
+                    List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
+                    if (trackedValues != null && !trackedValues.isEmpty()) {
+                        updates.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+                    }
+                    fakeEntityUpdatePackets.put(realEntity.getUuid(), updates);
+
+                    break; // Entity is visible, no need to check other portals
+                }
+            }
+        }
+
+        List<Packet<?>> fakeEntityFinalPackets = new ArrayList<>();
+        // Spawn new fake entities
+        for (UUID uuid : fakeEntitiesInView) {
+            if (!shownFakeEntities.contains(uuid) && !fakeEntityFlickerGuard.containsKey(uuid)) {
+                fakeEntityFinalPackets.add(fakeEntitySpawnPackets.get(uuid));
+                fakeEntityFinalPackets.addAll(fakeEntityUpdatePackets.get(uuid)); // Send initial data
+            } else if (shownFakeEntities.contains(uuid)) {
+                fakeEntityFinalPackets.addAll(fakeEntityUpdatePackets.get(uuid));
+            }
+        }
+
+        // Destroy old fake entities
+        Set<UUID> toRemove = new HashSet<>(shownFakeEntities);
+        toRemove.removeAll(fakeEntitiesInView);
+        if (!toRemove.isEmpty()) {
+            int[] idsToDestroy = toRemove.stream()
+                    .mapToInt(realToFakeId::get)
+                    .toArray();
+            fakeEntityFinalPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
+            toRemove.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
+        }
+
+        shownFakeEntities.clear();
+        shownFakeEntities.addAll(fakeEntitiesInView);
+
+
         Set<UUID> allInRangeUuids = this.nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
         hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
         flickerGuard.keySet().removeIf(uuid -> !allInRangeUuids.contains(uuid));
@@ -232,6 +344,10 @@ public class PlayerManager {
             for (Entity entity : entitiesToShow) {
                 EntityTrackerEntry entry = new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {});
                 entry.sendPackets(player, player.networkHandler::sendPacket);
+            }
+
+            for (Packet<?> packet : fakeEntityFinalPackets) {
+                player.networkHandler.sendPacket(packet);
             }
         });
     }
@@ -263,6 +379,19 @@ public class PlayerManager {
         }
         flickerGuard.clear();
 
+        // Purge fake entities
+        List<Integer> fakeIdsToDestroy = new ArrayList<>();
+        if (!shownFakeEntities.isEmpty()) {
+            for (UUID uuid : shownFakeEntities) {
+                fakeIdsToDestroy.add(realToFakeId.get(uuid));
+            }
+        }
+        shownFakeEntities.clear();
+        fakeEntityFlickerGuard.clear();
+        realToFakeId.clear();
+        fakeToRealId.clear();
+
+
         cursednessServer.addTask(() -> {
             if (!player.networkHandler.isConnectionOpen()) return;
 
@@ -271,6 +400,10 @@ public class PlayerManager {
             for (Entity entity : entitiesToShow) {
                 EntityTrackerEntry entry = new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {});
                 entry.sendPackets(player, player.networkHandler::sendPacket);
+            }
+
+            if (!fakeIdsToDestroy.isEmpty()) {
+                player.networkHandler.sendPacket(new EntitiesDestroyS2CPacket(fakeIdsToDestroy.stream().mapToInt(i->i).toArray()));
             }
         });
     }

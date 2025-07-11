@@ -38,6 +38,10 @@ public class Portal {
     }
 
     public boolean isBlockposBehind(BlockPos p, Vec3d originContext) {
+        return isPosBehind(p.toCenterPos(), originContext);
+    }
+
+    public boolean isPosBehind(Vec3d p, Vec3d originContext) {
         if (!isBehind(originContext, p)) return false;
         FlatStandingRectangle rect = this.toFlatStandingRectangle();
         FlatStandingRectangle rect2 = rect.expandAbsolute(Util.get(p, rect.axis), originContext);
@@ -45,8 +49,12 @@ public class Portal {
     }
 
     private boolean isBehind(Vec3d origin, BlockPos p) {
+        return isBehind(origin, p.toCenterPos());
+    }
+
+    private boolean isBehind(Vec3d origin, Vec3d p) {
         Direction.Axis rot = Util.rotate(axis);
-        int a = Util.get(p, rot);
+        double a = Util.get(p, rot);
         double b = Util.get(origin, rot);
         double middle = Util.get(upperRight, rot);
         return a < middle ^ middle > b;

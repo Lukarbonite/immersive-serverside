@@ -111,6 +111,47 @@ public class TransformProfile {
         );
     }
 
+    public Vec3d untransform(Vec3d in) {
+        double relX = in.getX() - targetX;
+        double relZ = in.getZ() - targetZ;
+
+        double newRelX;
+        double newRelZ;
+
+        switch (this.rotation) {
+            case -90: // untransform a CW rotation is a CCW rotation
+                newRelX = -relZ;
+                newRelZ = relX;
+                break;
+            case 90: // untransform a CCW rotation is a CW rotation
+                newRelX = relZ;
+                newRelZ = -relX;
+                break;
+            case 180:
+                newRelX = -relX;
+                newRelZ = -relZ;
+                break;
+            default: // 0
+                newRelX = relX;
+                newRelZ = relZ;
+                break;
+        }
+
+        return new Vec3d(
+                newRelX + originalX,
+                (in.getY() - targetY) + originalY,
+                newRelZ + originalZ
+        );
+    }
+
+    public float untransformYaw(float in) {
+        float yaw = in - this.rotation;
+        while (yaw > 180) yaw -= 360;
+        while (yaw <= -180) yaw += 360;
+        return yaw;
+    }
+
+
     public BlockState rotateState(BlockState in) {
         return switch (rotation) {
             default -> in;
