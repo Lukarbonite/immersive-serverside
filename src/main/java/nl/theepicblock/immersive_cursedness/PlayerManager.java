@@ -88,9 +88,14 @@ public class PlayerManager {
                 TransformProfile profile = portal.getTransformProfile();
                 if (profile != null) {
                     Box destBox = new Box(profile.getTargetPos()).expand(icConfig.horizontalSendLimit + 20);
-                    destWorld.getEntitiesByType(TypeFilter.instanceOf(Entity.class), destBox, (entity) ->
-                                    entity.isAlive() && !entity.getUuid().equals(player.getUuid()) && entity.shouldSave()
-                            )
+                    destWorld.getEntitiesByType(TypeFilter.instanceOf(Entity.class), destBox, (entity) -> {
+                                boolean isThisPlayer = entity.getUuid().equals(player.getUuid());
+                                if (!entity.isAlive() || isThisPlayer) {
+                                    return false;
+                                }
+                                // Players don't "shouldSave", but we still want to see them.
+                                return entity.shouldSave() || entity instanceof ServerPlayerEntity;
+                            })
                             .forEach(entity -> {
                                 if (addedUuids.add(entity.getUuid())) {
                                     newDestinationEntities.add(entity);
