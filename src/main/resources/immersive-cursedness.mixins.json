@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_16",
   "mixins": [
     "EntityPositionS2CPacketAccessor",
+    "EntitySetHeadYawS2CPacketAccessor",
     "MixinServerPlayerEntity",
     "NetherPortalBlockMixin",
     "PortalForcerMixin",

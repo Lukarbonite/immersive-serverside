@@ -20,6 +20,7 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import nl.theepicblock.immersive_cursedness.mixin.EntitySetHeadYawS2CPacketAccessor;
 import nl.theepicblock.immersive_cursedness.objects.*;
 import org.jetbrains.annotations.Nullable;
 
@@ -363,6 +364,16 @@ public class PlayerManager {
             List<Packet<?>> updates = new ArrayList<>();
             updates.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, Vec3d.ZERO, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
             updates.add(new EntityVelocityUpdateS2CPacket(fakeId, transformProfile.untransform(realEntity.getVelocity())));
+
+            // Send head yaw updates
+            byte headYawByte = (byte) MathHelper.floor(fakeHeadYaw * 256.0F / 360.0F);
+            // We need an entity to construct the packet, but we'll overwrite the fields.
+            EntitySetHeadYawS2CPacket headYawPacket = new EntitySetHeadYawS2CPacket(realEntity, (byte)0);
+            var headYawAccessor = (EntitySetHeadYawS2CPacketAccessor) headYawPacket;
+            headYawAccessor.ic$setEntityId(fakeId);
+            headYawAccessor.ic$setHeadYaw(headYawByte);
+            updates.add(headYawPacket);
+
             List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
             if (trackedValues != null && !trackedValues.isEmpty()) {
                 updates.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
