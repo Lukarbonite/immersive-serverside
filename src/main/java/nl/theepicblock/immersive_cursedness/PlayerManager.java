@@ -6,6 +6,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.data.DataTracker;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerPosition;
 import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.packet.Packet;
@@ -41,6 +42,9 @@ public class PlayerManager {
     private final Set<UUID> shownFakeEntities = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> fakeEntityFlickerGuard = new ConcurrentHashMap<>();
     private int nextFakeEntityId = -1000000;
+
+    // For vehicle dismount grace period
+    private final Map<UUID, UUID> lastTickVehicleMap = new ConcurrentHashMap<>();
 
     private static final int FLICKER_GUARD_TICKS = 5;
 
@@ -96,7 +100,9 @@ public class PlayerManager {
                                     return false;
                                 }
                                 // Players don't "shouldSave", but we still want to see them.
-                                return entity.shouldSave() || entity instanceof ServerPlayerEntity;
+                                // Mobs being ridden by a player also return false for shouldSave(), so we must explicitly include them.
+                                boolean isRiddenByPlayer = entity.getPassengerList().stream().anyMatch(p -> p instanceof PlayerEntity);
+                                return entity.shouldSave() || entity instanceof ServerPlayerEntity || isRiddenByPlayer;
                             })
                             .forEach(entity -> {
                                 if (addedUuids.add(entity.getUuid())) {
@@ -259,6 +265,8 @@ public class PlayerManager {
         }
 
         // Handle fake entities
+        final Map<UUID, Entity> destinationEntityMap = this.destinationEntities.stream().collect(Collectors.toMap(Entity::getUuid, e -> e, (a, b) -> a));
+
         // Step 1: Find all entities directly visible through a portal
         Map<UUID, Entity> visibleRealEntities = new HashMap<>();
         Map<UUID, Portal> entityPortalContext = new HashMap<>();
@@ -286,13 +294,44 @@ public class PlayerManager {
                 if (passenger.hasVehicle()) {
                     Entity vehicle = passenger.getVehicle();
                     if (vehicle != null && !visibleRealEntities.containsKey(vehicle.getUuid())) {
-                        visibleRealEntities.put(vehicle.getUuid(), vehicle);
-                        entityPortalContext.put(vehicle.getUuid(), entityPortalContext.get(passenger.getUuid()));
-                        addedNew = true;
+                        Entity vehicleEntity = destinationEntityMap.get(vehicle.getUuid());
+                        if (vehicleEntity != null) {
+                            visibleRealEntities.put(vehicle.getUuid(), vehicleEntity);
+                            entityPortalContext.put(vehicle.getUuid(), entityPortalContext.get(passenger.getUuid()));
+                            addedNew = true;
+                        }
                     }
                 }
             }
         } while (addedNew);
+
+        // Step 2.5: Handle dismounts. A vehicle that just lost its only visible passenger
+        // might pop out of existence. Keep it visible for one more tick to allow things to settle.
+        for (Map.Entry<UUID, UUID> entry : this.lastTickVehicleMap.entrySet()) {
+            UUID passengerUuid = entry.getKey();
+            UUID vehicleUuid = entry.getValue();
+
+            // If the vehicle from last tick is NOT visible this tick...
+            if (!visibleRealEntities.containsKey(vehicleUuid)) {
+                Entity passenger = visibleRealEntities.get(passengerUuid);
+                // ...and its former passenger IS visible but is no longer riding it...
+                if (passenger != null && (passenger.getVehicle() == null || !passenger.getVehicle().getUuid().equals(vehicleUuid))) {
+                    // ...then force the vehicle to be visible for this tick to prevent it from disappearing.
+                    Entity vehicleEntity = destinationEntityMap.get(vehicleUuid);
+                    if (vehicleEntity != null) {
+                        visibleRealEntities.put(vehicleUuid, vehicleEntity);
+                        // Re-use the passenger's portal context from this tick, as it's the best guess we have.
+                        entityPortalContext.put(vehicleUuid, entityPortalContext.get(passengerUuid));
+                    }
+                }
+            }
+        }
+        this.lastTickVehicleMap.clear();
+        for (Entity entity : visibleRealEntities.values()) {
+            if (entity.hasVehicle()) {
+                this.lastTickVehicleMap.put(entity.getUuid(), entity.getVehicle().getUuid());
+            }
+        }
 
 
         // Step 3: Generate spawn and update packets for all visible entities
@@ -335,7 +374,7 @@ public class PlayerManager {
         // Spawn new fake entities
         for (UUID uuid : visibleUuids) {
             List<Packet<?>> updates = fakeEntityUpdatePackets.get(uuid);
-            if (updates == null) continue; // Should not happen with the new logic
+            if (updates == null) continue;
 
             if (!shownFakeEntities.contains(uuid) && !fakeEntityFlickerGuard.containsKey(uuid)) {
                 fakeEntityFinalPackets.add(fakeEntitySpawnPackets.get(uuid));
@@ -348,20 +387,20 @@ public class PlayerManager {
         // Add passenger linking packets
         for (UUID uuid : visibleUuids) {
             Entity realVehicle = visibleRealEntities.get(uuid);
-            if (realVehicle != null && !realVehicle.getPassengerList().isEmpty()) {
+            if (realVehicle != null) {
+                // This now sends a packet even if the passenger list is empty, which is crucial for dismounts.
                 int[] visiblePassengerIds = realVehicle.getPassengerList().stream()
                         .map(Entity::getUuid)
                         .filter(visibleUuids::contains)
-                        .mapToInt(realToFakeId::get)
+                        .mapToInt(pUuid -> realToFakeId.getOrDefault(pUuid, 0))
+                        .filter(id -> id != 0)
                         .toArray();
 
-                if (visiblePassengerIds.length > 0) {
-                    int fakeVehicleId = realToFakeId.get(uuid);
-                    PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
-                    buf.writeVarInt(fakeVehicleId);
-                    buf.writeIntArray(visiblePassengerIds);
-                    fakeEntityFinalPackets.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
-                }
+                int fakeVehicleId = realToFakeId.get(uuid);
+                PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
+                buf.writeVarInt(fakeVehicleId);
+                buf.writeIntArray(visiblePassengerIds);
+                fakeEntityFinalPackets.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
             }
         }
 
@@ -447,6 +486,7 @@ public class PlayerManager {
         fakeEntityFlickerGuard.clear();
         realToFakeId.clear();
         fakeToRealId.clear();
+        lastTickVehicleMap.clear();
 
 
         cursednessServer.addTask(() -> {
