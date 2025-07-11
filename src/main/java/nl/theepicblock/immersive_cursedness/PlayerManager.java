@@ -1,11 +1,13 @@
 package nl.theepicblock.immersive_cursedness;
 
+import io.netty.buffer.Unpooled;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.player.PlayerPosition;
+import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.*;
 import net.minecraft.server.network.EntityTrackerEntry;
@@ -257,80 +259,128 @@ public class PlayerManager {
         }
 
         // Handle fake entities
-        Set<UUID> fakeEntitiesInView = new HashSet<>();
-        Map<UUID, Packet<?>> fakeEntitySpawnPackets = new HashMap<>();
-        Map<UUID, List<Packet<?>>> fakeEntityUpdatePackets = new HashMap<>();
-
+        // Step 1: Find all entities directly visible through a portal
+        Map<UUID, Entity> visibleRealEntities = new HashMap<>();
+        Map<UUID, Portal> entityPortalContext = new HashMap<>();
         for (Entity realEntity : this.destinationEntities) {
             for (Portal portal : this.portalsToProcess) {
                 TransformProfile transformProfile = portal.getTransformProfile();
+                if (transformProfile == null) continue;
                 Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
-
-                boolean isVisible = false;
                 for (FlatStandingRectangle rect : viewRects) {
                     if (rect.contains(fakePos)) {
-                        isVisible = true;
+                        visibleRealEntities.put(realEntity.getUuid(), realEntity);
+                        entityPortalContext.put(realEntity.getUuid(), portal);
                         break;
                     }
                 }
+                if (visibleRealEntities.containsKey(realEntity.getUuid())) break;
+            }
+        }
 
-                if (isVisible) {
-                    fakeEntitiesInView.add(realEntity.getUuid());
-                    int fakeId = realToFakeId.computeIfAbsent(realEntity.getUuid(), k -> {
-                        int newId = nextFakeEntityId--;
-                        fakeToRealId.put(newId, k);
-                        return newId;
-                    });
-                    float fakeYaw = transformProfile.untransformYaw(realEntity.getYaw());
-                    float fakeHeadYaw = transformProfile.untransformYaw(realEntity.getHeadYaw());
-
-                    EntitySpawnS2CPacket spawnPacket = new EntitySpawnS2CPacket(
-                            fakeId, realEntity.getUuid(), fakePos.x, fakePos.y, fakePos.z,
-                            realEntity.getPitch(), fakeYaw, realEntity.getType(), 0,
-                            transformProfile.untransform(realEntity.getVelocity()), fakeHeadYaw
-                    );
-                    fakeEntitySpawnPackets.put(realEntity.getUuid(), spawnPacket);
-
-                    List<Packet<?>> updates = new ArrayList<>();
-                    PlayerPosition playerPos = new PlayerPosition(fakePos, Vec3d.ZERO, fakeYaw, realEntity.getPitch());
-                    updates.add(new EntityPositionS2CPacket(fakeId, playerPos, Collections.emptySet(), realEntity.isOnGround()));
-                    updates.add(new EntityVelocityUpdateS2CPacket(fakeId, transformProfile.untransform(realEntity.getVelocity())));
-                    List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
-                    if (trackedValues != null && !trackedValues.isEmpty()) {
-                        updates.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+        // Step 2: Ensure that if a passenger is visible, its vehicle is too.
+        boolean addedNew;
+        do {
+            addedNew = false;
+            for (Entity passenger : new ArrayList<>(visibleRealEntities.values())) {
+                if (passenger.hasVehicle()) {
+                    Entity vehicle = passenger.getVehicle();
+                    if (vehicle != null && !visibleRealEntities.containsKey(vehicle.getUuid())) {
+                        visibleRealEntities.put(vehicle.getUuid(), vehicle);
+                        entityPortalContext.put(vehicle.getUuid(), entityPortalContext.get(passenger.getUuid()));
+                        addedNew = true;
                     }
-                    fakeEntityUpdatePackets.put(realEntity.getUuid(), updates);
-
-                    break; // Entity is visible, no need to check other portals
                 }
             }
+        } while (addedNew);
+
+
+        // Step 3: Generate spawn and update packets for all visible entities
+        Set<UUID> visibleUuids = visibleRealEntities.keySet();
+        Map<UUID, Packet<?>> fakeEntitySpawnPackets = new HashMap<>();
+        Map<UUID, List<Packet<?>>> fakeEntityUpdatePackets = new HashMap<>();
+
+        for (Entity realEntity : visibleRealEntities.values()) {
+            UUID uuid = realEntity.getUuid();
+            Portal portal = entityPortalContext.get(uuid);
+            if (portal == null) continue;
+
+            TransformProfile transformProfile = portal.getTransformProfile();
+            Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
+
+            int fakeId = realToFakeId.computeIfAbsent(uuid, k -> {
+                int newId = nextFakeEntityId--;
+                fakeToRealId.put(newId, k);
+                return newId;
+            });
+            float fakeYaw = transformProfile.untransformYaw(realEntity.getYaw());
+            float fakeHeadYaw = transformProfile.untransformYaw(realEntity.getHeadYaw());
+
+            fakeEntitySpawnPackets.put(uuid, new EntitySpawnS2CPacket(
+                    fakeId, realEntity.getUuid(), fakePos.x, fakePos.y, fakePos.z,
+                    realEntity.getPitch(), fakeYaw, realEntity.getType(), 0,
+                    transformProfile.untransform(realEntity.getVelocity()), fakeHeadYaw));
+
+            List<Packet<?>> updates = new ArrayList<>();
+            updates.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, Vec3d.ZERO, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
+            updates.add(new EntityVelocityUpdateS2CPacket(fakeId, transformProfile.untransform(realEntity.getVelocity())));
+            List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
+            if (trackedValues != null && !trackedValues.isEmpty()) {
+                updates.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+            }
+            fakeEntityUpdatePackets.put(uuid, updates);
         }
 
         List<Packet<?>> fakeEntityFinalPackets = new ArrayList<>();
         // Spawn new fake entities
-        for (UUID uuid : fakeEntitiesInView) {
+        for (UUID uuid : visibleUuids) {
+            List<Packet<?>> updates = fakeEntityUpdatePackets.get(uuid);
+            if (updates == null) continue; // Should not happen with the new logic
+
             if (!shownFakeEntities.contains(uuid) && !fakeEntityFlickerGuard.containsKey(uuid)) {
                 fakeEntityFinalPackets.add(fakeEntitySpawnPackets.get(uuid));
-                fakeEntityFinalPackets.addAll(fakeEntityUpdatePackets.get(uuid)); // Send initial data
+                fakeEntityFinalPackets.addAll(updates);
             } else if (shownFakeEntities.contains(uuid)) {
-                fakeEntityFinalPackets.addAll(fakeEntityUpdatePackets.get(uuid));
+                fakeEntityFinalPackets.addAll(updates);
+            }
+        }
+
+        // Add passenger linking packets
+        for (UUID uuid : visibleUuids) {
+            Entity realVehicle = visibleRealEntities.get(uuid);
+            if (realVehicle != null && !realVehicle.getPassengerList().isEmpty()) {
+                int[] visiblePassengerIds = realVehicle.getPassengerList().stream()
+                        .map(Entity::getUuid)
+                        .filter(visibleUuids::contains)
+                        .mapToInt(realToFakeId::get)
+                        .toArray();
+
+                if (visiblePassengerIds.length > 0) {
+                    int fakeVehicleId = realToFakeId.get(uuid);
+                    PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
+                    buf.writeVarInt(fakeVehicleId);
+                    buf.writeIntArray(visiblePassengerIds);
+                    fakeEntityFinalPackets.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
+                }
             }
         }
 
         // Destroy old fake entities
         Set<UUID> toRemove = new HashSet<>(shownFakeEntities);
-        toRemove.removeAll(fakeEntitiesInView);
+        toRemove.removeAll(visibleUuids);
         if (!toRemove.isEmpty()) {
             int[] idsToDestroy = toRemove.stream()
-                    .mapToInt(realToFakeId::get)
+                    .mapToInt(uuid -> realToFakeId.getOrDefault(uuid, 0))
+                    .filter(id -> id != 0)
                     .toArray();
-            fakeEntityFinalPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
+            if (idsToDestroy.length > 0) {
+                fakeEntityFinalPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
+            }
             toRemove.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
         }
 
         shownFakeEntities.clear();
-        shownFakeEntities.addAll(fakeEntitiesInView);
-
+        shownFakeEntities.addAll(visibleUuids);
 
         Set<UUID> allInRangeUuids = this.nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
         hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
