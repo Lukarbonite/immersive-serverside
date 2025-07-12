@@ -398,55 +398,72 @@ public class PlayerManager {
         }
 
         List<Packet<?>> fakeEntityFinalPackets = new ArrayList<>();
-        // Spawn new fake entities
-        for (UUID uuid : visibleUuids) {
-            List<Packet<?>> updates = fakeEntityUpdatePackets.get(uuid);
-            if (updates == null) continue;
+        Set<UUID> entitiesToActuallyShow = new HashSet<>();
+        Set<UUID> entitiesToActuallyDestroy = new HashSet<>();
 
-            if (!shownFakeEntities.contains(uuid) && !fakeEntityFlickerGuard.containsKey(uuid)) {
+        // Decide which entities to spawn and which to just update
+        for (UUID uuid : visibleUuids) {
+            if (shownFakeEntities.contains(uuid)) { // It was already shown
+                entitiesToActuallyShow.add(uuid);
+            } else { // It's new
+                if (!fakeEntityFlickerGuard.containsKey(uuid)) { // And it's not flicker-guarded
+                    entitiesToActuallyShow.add(uuid); // So we can show it
+                }
+            }
+        }
+
+        // Decide which entities to destroy
+        for (UUID uuid : shownFakeEntities) {
+            if (!visibleUuids.contains(uuid)) {
+                entitiesToActuallyDestroy.add(uuid);
+            }
+        }
+
+        // Generate spawn and update packets based on the decisions
+        for (UUID uuid : entitiesToActuallyShow) {
+            if (!shownFakeEntities.contains(uuid)) { // If it wasn't shown before, it's a new spawn
                 fakeEntityFinalPackets.add(fakeEntitySpawnPackets.get(uuid));
-                fakeEntityFinalPackets.addAll(updates);
-            } else if (shownFakeEntities.contains(uuid)) {
-                fakeEntityFinalPackets.addAll(updates);
+            }
+            // Always send update packets for any entity that should be shown
+            fakeEntityFinalPackets.addAll(fakeEntityUpdatePackets.get(uuid));
+        }
+
+        // Generate passenger packets, but only for vehicles that were already shown last tick
+        for (UUID uuid : entitiesToActuallyShow) {
+            if (shownFakeEntities.contains(uuid)) { // Only send for vehicles that are not new this tick
+                Entity realVehicle = visibleRealEntities.get(uuid);
+                if (realVehicle != null) {
+                    int[] visiblePassengerIds = realVehicle.getPassengerList().stream()
+                            .map(Entity::getUuid)
+                            .filter(entitiesToActuallyShow::contains) // Passenger must also be on the "show" list
+                            .mapToInt(pUuid -> realToFakeId.getOrDefault(pUuid, 0))
+                            .filter(id -> id != 0)
+                            .toArray();
+
+                    int fakeVehicleId = realToFakeId.get(uuid);
+                    PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
+                    buf.writeVarInt(fakeVehicleId);
+                    buf.writeIntArray(visiblePassengerIds);
+                    fakeEntityFinalPackets.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
+                }
             }
         }
 
-        // Add passenger linking packets
-        for (UUID uuid : visibleUuids) {
-            Entity realVehicle = visibleRealEntities.get(uuid);
-            if (realVehicle != null) {
-                // This now sends a packet even if the passenger list is empty, which is crucial for dismounts.
-                int[] visiblePassengerIds = realVehicle.getPassengerList().stream()
-                        .map(Entity::getUuid)
-                        .filter(visibleUuids::contains)
-                        .mapToInt(pUuid -> realToFakeId.getOrDefault(pUuid, 0))
-                        .filter(id -> id != 0)
-                        .toArray();
-
-                int fakeVehicleId = realToFakeId.get(uuid);
-                PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
-                buf.writeVarInt(fakeVehicleId);
-                buf.writeIntArray(visiblePassengerIds);
-                fakeEntityFinalPackets.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
-            }
-        }
-
-        // Destroy old fake entities
-        Set<UUID> toRemove = new HashSet<>(shownFakeEntities);
-        toRemove.removeAll(visibleUuids);
-        if (!toRemove.isEmpty()) {
-            int[] idsToDestroy = toRemove.stream()
+        // Generate destroy packets
+        if (!entitiesToActuallyDestroy.isEmpty()) {
+            int[] idsToDestroy = entitiesToActuallyDestroy.stream()
                     .mapToInt(uuid -> realToFakeId.getOrDefault(uuid, 0))
                     .filter(id -> id != 0)
                     .toArray();
             if (idsToDestroy.length > 0) {
                 fakeEntityFinalPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
             }
-            toRemove.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
+            entitiesToActuallyDestroy.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
         }
 
+        // Update the master set of shown entities for the next tick
         shownFakeEntities.clear();
-        shownFakeEntities.addAll(visibleUuids);
+        shownFakeEntities.addAll(entitiesToActuallyShow);
 
         Set<UUID> allInRangeUuids = this.nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
         hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
