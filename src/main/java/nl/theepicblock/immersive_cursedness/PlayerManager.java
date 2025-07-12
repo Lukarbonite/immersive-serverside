@@ -251,7 +251,7 @@ public class PlayerManager {
 
         for (Entity entity : this.nearbyEntities) {
             UUID uuid = entity.getUuid();
-            boolean shouldBeHidden = entitiesInCullingZone.contains(uuid);
+            boolean shouldBeHidden = entitiesInCullingZone.contains(uuid) || fakeEntityFlickerGuard.containsKey(uuid);
             boolean isCurrentlyHidden = hiddenEntities.contains(uuid);
             boolean isFlickerGuarded = flickerGuard.containsKey(uuid);
 

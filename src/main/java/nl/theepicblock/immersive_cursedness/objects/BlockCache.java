@@ -19,7 +19,7 @@ public class BlockCache {
 	private final Int2ObjectMap<Int2ObjectMap<Map<BlockPos,BlockState>>> cache = new Int2ObjectOpenHashMap<>(DEFAULT_MAP_SIZE);
 	private int size = 0;
 
-	public BlockState get(BlockPos p) {
+	public synchronized BlockState get(BlockPos p) {
 		Int2ObjectMap<Map<BlockPos,BlockState>> chunkSlice = cache.get(p.getX() >> CHUNK_SIZE);
 		if (chunkSlice == null) return null;
 
@@ -28,7 +28,7 @@ public class BlockCache {
 		return chunk.get(p);
 	}
 
-	public void put(BlockPos p, BlockState t) {
+	public synchronized void put(BlockPos p, BlockState t) {
 		Int2ObjectMap<Map<BlockPos,BlockState>> chunkSlice = cache.get(p.getX() >> CHUNK_SIZE);
 		if (chunkSlice == null) {
 			chunkSlice = new Int2ObjectOpenHashMap<>(DEFAULT_MAP_SIZE);
@@ -45,11 +45,11 @@ public class BlockCache {
 		if (v == null) size++;
 	}
 
-	public int size() {
+	public synchronized int size() {
 		return size;
 	}
 
-	public void purge(Chunk2IntMap blockPerChunk, List<FlatStandingRectangle> rects, BiConsumer<BlockPos, BlockState> onRemove) {
+	public synchronized void purge(Chunk2IntMap blockPerChunk, List<FlatStandingRectangle> rects, BiConsumer<BlockPos, BlockState> onRemove) {
 		if (size == blockPerChunk.getTotal()) return;
 
 		var sliceIterator = cache.int2ObjectEntrySet().iterator();
@@ -102,7 +102,7 @@ public class BlockCache {
 		v.forEach(onRemove);
 	}
 
-	public void purgeAll(BiConsumer<BlockPos, BlockState> onRemove) {
+	public synchronized void purgeAll(BiConsumer<BlockPos, BlockState> onRemove) {
 		cache.values().forEach((slice) -> purge(slice, onRemove));
 		cache.clear();
 		size=0;
