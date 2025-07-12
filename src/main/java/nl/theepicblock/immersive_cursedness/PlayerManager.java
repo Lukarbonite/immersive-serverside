@@ -1,13 +1,17 @@
 package nl.theepicblock.immersive_cursedness;
 
+import com.mojang.datafixers.util.Pair;
 import io.netty.buffer.Unpooled;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerPosition;
+import net.minecraft.item.ItemStack;
 import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.*;
@@ -373,6 +377,18 @@ public class PlayerManager {
             headYawAccessor.ic$setEntityId(fakeId);
             headYawAccessor.ic$setHeadYaw(headYawByte);
             updates.add(headYawPacket);
+
+            // Send equipment
+            if (realEntity instanceof LivingEntity) {
+                LivingEntity livingEntity = (LivingEntity) realEntity;
+                List<Pair<EquipmentSlot, ItemStack>> equipmentList = new ArrayList<>();
+                for (EquipmentSlot slot : EquipmentSlot.values()) {
+                    equipmentList.add(Pair.of(slot, livingEntity.getEquippedStack(slot)));
+                }
+                if (!equipmentList.isEmpty()) {
+                    updates.add(new EntityEquipmentUpdateS2CPacket(fakeId, equipmentList));
+                }
+            }
 
             List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
             if (trackedValues != null && !trackedValues.isEmpty()) {
