@@ -169,6 +169,8 @@ public class PlayerManager {
         boolean isNearPortal = false;
         var bottomOfWorld = sourceWorld.getBottomY();
 
+        // STAGE 1: CALCULATION and PURGE
+        // First, do a "dry run" to figure out what should be visible.
         for (Portal portal : portalsToProcess) {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
@@ -182,14 +184,7 @@ public class PlayerManager {
 
             BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
                 if (portalRect.contains(portalBlockPos)) {
-                    BlockPos immutablePos = portalBlockPos.toImmutable();
-                    blocksInView.increment(immutablePos);
-                    BlockState newState = Blocks.AIR.getDefaultState();
-                    BlockState cachedState = blockCache.get(immutablePos);
-                    if (cachedState == null || !cachedState.equals(newState)) {
-                        blockCache.put(immutablePos, newState);
-                        blockUpdatesToSend.put(immutablePos, newState);
-                    }
+                    blocksInView.increment(portalBlockPos.toImmutable());
                 }
             });
 
@@ -219,6 +214,59 @@ public class PlayerManager {
 
                 layerToRender.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
                     double distSq = portal.getDistance(pos);
+                    if (distSq <= icConfig.squaredAtmosphereRadiusPlusOne) {
+                        blocksInView.increment(pos.toImmutable());
+                    }
+                });
+            }
+        }
+
+        // Now that we know everything that *should* be visible, purge everything else from the cache.
+        blockCache.purge(blocksInView, viewRects, (pos, cachedState) -> {
+            BlockState originalState = sourceView.getBlock(pos);
+            if (!originalState.equals(cachedState)) {
+                blockUpdatesToSend.put(pos, originalState);
+                BlockEntity originalBlockEntity = sourceView.getBlockEntity(pos);
+                if (originalBlockEntity != null) {
+                    packetList.add(Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld));
+                }
+            }
+        });
+
+        // STAGE 2: RENDER
+        // Now, iterate again and send updates for what's new or has changed.
+        for (Portal portal : portalsToProcess) {
+            TransformProfile transformProfile = portal.getTransformProfile();
+            if (transformProfile == null) continue;
+            FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
+            Vec3d playerEyePos = player.getEyePos();
+            double playerCoordinateOnAxis = Util.get(playerEyePos, portalRect.getAxis());
+            double portalCoordinateOnAxis = portalRect.getOther();
+
+            // Render portal blocks
+            BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
+                if (portalRect.contains(portalBlockPos)) {
+                    BlockPos immutablePos = portalBlockPos.toImmutable();
+                    BlockState newState = Blocks.AIR.getDefaultState();
+                    BlockState cachedState = blockCache.get(immutablePos);
+                    if (cachedState == null || !cachedState.equals(newState)) {
+                        blockCache.put(immutablePos, newState);
+                        blockUpdatesToSend.put(immutablePos, newState);
+                    }
+                }
+            });
+
+            // Render view layers
+            for (int i = 1; i < icConfig.portalDepth; i++) {
+                FlatStandingRectangle layerToRender;
+                if (playerCoordinateOnAxis > portalCoordinateOnAxis) {
+                    layerToRender = portalRect.expandAbsolute(portalCoordinateOnAxis - i, playerEyePos);
+                } else {
+                    layerToRender = portalRect.expandAbsolute(portalCoordinateOnAxis + i, playerEyePos);
+                }
+
+                layerToRender.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
+                    double distSq = portal.getDistance(pos);
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) return;
 
                     BlockState newState;
@@ -237,9 +285,8 @@ public class PlayerManager {
                     if (pos.getY() == bottomOfWorld) newState = atmosphereBlock;
 
                     BlockPos immutablePos = pos.toImmutable();
-                    blocksInView.increment(immutablePos);
-
                     BlockState cachedState = blockCache.get(immutablePos);
+
                     if (cachedState == null || !cachedState.equals(newState)) {
                         blockCache.put(immutablePos, newState);
                         blockUpdatesToSend.put(immutablePos, newState);
@@ -253,17 +300,6 @@ public class PlayerManager {
         }
 
         ((PlayerInterface) player).immersivecursedness$setCloseToPortal(isNearPortal);
-
-        blockCache.purge(blocksInView, viewRects, (pos, cachedState) -> {
-            BlockState originalState = sourceView.getBlock(pos);
-            if (!originalState.equals(cachedState)) {
-                blockUpdatesToSend.put(pos, originalState);
-                BlockEntity originalBlockEntity = sourceView.getBlockEntity(pos);
-                if (originalBlockEntity != null) {
-                    packetList.add(Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld));
-                }
-            }
-        });
 
         List<Entity> entitiesToHide = new ArrayList<>();
         List<Entity> entitiesToShow = new ArrayList<>();
@@ -289,7 +325,7 @@ public class PlayerManager {
         }
 
         // Handle fake entities
-        // Step 1: Find all entities directly visible through a portal
+        // Find all entities directly visible through a portal
         Map<UUID, Entity> visibleRealEntities = new HashMap<>();
         Map<UUID, Portal> entityPortalContext = new HashMap<>();
         for (Entity realEntity : destinationEntityMap.values()) {
@@ -308,7 +344,7 @@ public class PlayerManager {
             }
         }
 
-        // Step 2: Ensure that if a passenger is visible, its vehicle is too.
+        // Ensure that if a passenger is visible, its vehicle is too.
         boolean addedNew;
         do {
             addedNew = false;
@@ -327,18 +363,13 @@ public class PlayerManager {
             }
         } while (addedNew);
 
-        // Step 2.5: Handle dismounts. A vehicle that just lost its only visible passenger
-        // might pop out of existence. Keep it visible for one more tick to allow things to settle.
+        // Handle dismounts grace period
         for (Map.Entry<UUID, UUID> entry : this.lastTickVehicleMap.entrySet()) {
             UUID passengerUuid = entry.getKey();
             UUID vehicleUuid = entry.getValue();
-
-            // If the vehicle from last tick is NOT visible this tick...
             if (!visibleRealEntities.containsKey(vehicleUuid)) {
                 Entity passenger = visibleRealEntities.get(passengerUuid);
-                // ...and its former passenger IS visible but is no longer riding it...
                 if (passenger != null && (passenger.getVehicle() == null || !passenger.getVehicle().getUuid().equals(vehicleUuid))) {
-                    // ...then force the vehicle to be visible for this tick to prevent it from disappearing.
                     Entity vehicleEntity = destinationEntityMap.get(vehicleUuid);
                     if (vehicleEntity != null) {
                         visibleRealEntities.put(vehicleUuid, vehicleEntity);
@@ -355,7 +386,7 @@ public class PlayerManager {
         }
 
 
-        // Step 3: Pre-generate spawn packets for all visible entities
+        // Pre-generate spawn packets for all visible entities
         Set<UUID> visibleUuids = visibleRealEntities.keySet();
         Map<UUID, Packet<?>> fakeEntitySpawnPackets = new HashMap<>();
         for (Entity realEntity : visibleRealEntities.values()) {
@@ -385,11 +416,11 @@ public class PlayerManager {
 
         // Decide which entities to spawn and which to just update
         for (UUID uuid : visibleUuids) {
-            if (shownFakeEntities.contains(uuid)) { // It was already shown
+            if (shownFakeEntities.contains(uuid)) {
                 entitiesToActuallyShow.add(uuid);
-            } else { // It's new
-                if (!fakeEntityFlickerGuard.containsKey(uuid)) { // And it's not flicker-guarded
-                    entitiesToActuallyShow.add(uuid); // So we can show it
+            } else {
+                if (!fakeEntityFlickerGuard.containsKey(uuid)) {
+                    entitiesToActuallyShow.add(uuid);
                 }
             }
         }
@@ -408,7 +439,7 @@ public class PlayerManager {
             }
         }
 
-        // STAGE 2: UPDATE PACKETS (POSITION, EQUIPMENT, ETC.) - METADATA IS HANDLED ON MAIN THREAD
+        // STAGE 2: UPDATE PACKETS (POSITION, EQUIPMENT, ETC.)
         for (UUID uuid : entitiesToActuallyShow) {
             boolean isNew = !shownFakeEntities.contains(uuid);
             Entity realEntity = visibleRealEntities.get(uuid);
@@ -417,13 +448,11 @@ public class PlayerManager {
             TransformProfile transformProfile = portal.getTransformProfile();
             int fakeId = realToFakeId.get(uuid);
 
-            // Position and Velocity
             Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
             Vec3d fakeVel = transformProfile.untransformVector(realEntity.getVelocity());
             float fakeYaw = transformProfile.untransformYaw(realEntity.getYaw());
             fakeEntityFinalPackets.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
 
-            // Head Yaw
             float fakeHeadYaw = transformProfile.untransformYaw(realEntity.getHeadYaw());
             byte headYawByte = (byte) MathHelper.floor(fakeHeadYaw * 256.0F / 360.0F);
             EntitySetHeadYawS2CPacket headYawPacket = new EntitySetHeadYawS2CPacket(realEntity, (byte)0);
@@ -431,7 +460,6 @@ public class PlayerManager {
             ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setHeadYaw(headYawByte);
             fakeEntityFinalPackets.add(headYawPacket);
 
-            // Equipment (only needs to be sent on spawn)
             if (isNew && realEntity instanceof LivingEntity) {
                 LivingEntity livingEntity = (LivingEntity) realEntity;
                 List<Pair<EquipmentSlot, ItemStack>> equipmentList = new ArrayList<>();
@@ -443,7 +471,6 @@ public class PlayerManager {
                 }
             }
 
-            // DataTracker (only for initial spawn)
             if (isNew) {
                 List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
                 if (trackedValues != null && !trackedValues.isEmpty()) {
@@ -455,7 +482,6 @@ public class PlayerManager {
         // STAGE 3: PASSENGER PACKETS
         for (UUID uuid : entitiesToActuallyShow) {
             Entity realVehicle = visibleRealEntities.get(uuid);
-            // Only send for entities that can have passengers and actually have them
             if (realVehicle != null && realVehicle.getType() != EntityType.ITEM && !realVehicle.getPassengerList().isEmpty()) {
                 int[] visiblePassengerIds = realVehicle.getPassengerList().stream()
                         .map(Entity::getUuid)
@@ -490,7 +516,6 @@ public class PlayerManager {
         // Update the master set of shown entities for the next tick
         shownFakeEntities.clear();
         shownFakeEntities.addAll(entitiesToActuallyShow);
-        // Mark entities for data tracker updates on the main thread
         this.entitiesToUpdateOnMainThread = new HashMap<>(visibleRealEntities);
 
 
