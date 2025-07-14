@@ -60,8 +60,9 @@ public class PlayerManager {
 
     // Data prepared on the main thread - marked volatile to ensure visibility from async thread
     private volatile List<Entity> nearbyEntities = new ArrayList<>();
-    private volatile List<Entity> destinationEntities = new ArrayList<>();
+    private volatile Map<UUID, Entity> destinationEntityMap = new HashMap<>(); // Changed from list to map for faster lookups
     private volatile List<Portal> portalsToProcess = new ArrayList<>();
+    private volatile Map<UUID, Entity> entitiesToUpdateOnMainThread = new HashMap<>();
 
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, CursednessServer cursednessServer) {
@@ -87,17 +88,17 @@ public class PlayerManager {
         if (tickCount % 30 == 0 || worldChanged) {
             portalManager.update(sourceView);
         }
+
         // Create snapshots for the async thread
         ArrayList<Portal> newPortals = new ArrayList<>(portalManager.getPortals());
         newPortals.sort(Comparator.comparing(Portal::getLowerLeft));
         this.portalsToProcess = newPortals;
         this.nearbyEntities = getEntitiesInRange(sourceWorld);
 
-        // Fetch entities from destination world near portal exits and create a new list
-        List<Entity> newDestinationEntities = new ArrayList<>();
+        // Fetch entities from destination world near portal exits and create a new map
+        Map<UUID, Entity> newDestinationEntities = new HashMap<>();
         if (this.destinationView != null && !this.portalsToProcess.isEmpty()) {
             ServerWorld destWorld = this.destinationView.getWorld();
-            Set<UUID> addedUuids = new HashSet<>();
             for (Portal portal : this.portalsToProcess) {
                 TransformProfile profile = portal.getTransformProfile();
                 if (profile != null) {
@@ -107,20 +108,30 @@ public class PlayerManager {
                                 if (!entity.isAlive() || isThisPlayer) {
                                     return false;
                                 }
-                                // Players don't "shouldSave", but we still want to see them.
-                                // Mobs being ridden by a player also return false for shouldSave(), so we must explicitly include them.
                                 boolean isRiddenByPlayer = entity.getPassengerList().stream().anyMatch(p -> p instanceof PlayerEntity);
                                 return entity.shouldSave() || entity instanceof ServerPlayerEntity || isRiddenByPlayer;
                             })
-                            .forEach(entity -> {
-                                if (addedUuids.add(entity.getUuid())) {
-                                    newDestinationEntities.add(entity);
-                                }
-                            });
+                            .forEach(entity -> newDestinationEntities.putIfAbsent(entity.getUuid(), entity));
                 }
             }
         }
-        this.destinationEntities = newDestinationEntities; // Atomically replace the list
+        this.destinationEntityMap = newDestinationEntities; // Atomically replace the map
+
+        // Send data tracker updates for entities that were marked by the async thread last tick
+        // This is now done on the main thread to prevent race conditions.
+        Map<UUID, Entity> entitiesToUpdate = this.entitiesToUpdateOnMainThread;
+        if (!entitiesToUpdate.isEmpty()) {
+            for (Map.Entry<UUID, Entity> entry : entitiesToUpdate.entrySet()) {
+                Entity realEntity = entry.getValue();
+                Integer fakeId = realToFakeId.get(realEntity.getUuid());
+                if (fakeId != null) {
+                    List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getDirtyEntries();
+                    if (trackedValues != null && !trackedValues.isEmpty()) {
+                        player.networkHandler.sendPacket(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+                    }
+                }
+            }
+        }
     }
 
     public void tickAsync(int tickCount) {
@@ -128,9 +139,9 @@ public class PlayerManager {
             return;
         }
 
-        // Make local copies of volatile lists to ensure thread safety during this tick
+        // Make local copies of volatile data to ensure thread safety during this tick
         List<Entity> nearbyEntities = this.nearbyEntities;
-        List<Entity> destinationEntities = this.destinationEntities;
+        Map<UUID, Entity> destinationEntityMap = this.destinationEntityMap;
         List<Portal> portalsToProcess = this.portalsToProcess;
 
         flickerGuard.replaceAll((k, v) -> v - 1);
@@ -278,12 +289,10 @@ public class PlayerManager {
         }
 
         // Handle fake entities
-        final Map<UUID, Entity> destinationEntityMap = destinationEntities.stream().collect(Collectors.toMap(Entity::getUuid, e -> e, (a, b) -> a));
-
         // Step 1: Find all entities directly visible through a portal
         Map<UUID, Entity> visibleRealEntities = new HashMap<>();
         Map<UUID, Portal> entityPortalContext = new HashMap<>();
-        for (Entity realEntity : destinationEntities) {
+        for (Entity realEntity : destinationEntityMap.values()) {
             for (Portal portal : portalsToProcess) {
                 TransformProfile transformProfile = portal.getTransformProfile();
                 if (transformProfile == null) continue;
@@ -333,7 +342,6 @@ public class PlayerManager {
                     Entity vehicleEntity = destinationEntityMap.get(vehicleUuid);
                     if (vehicleEntity != null) {
                         visibleRealEntities.put(vehicleUuid, vehicleEntity);
-                        // Re-use the passenger's portal context from this tick, as it's the best guess we have.
                         entityPortalContext.put(vehicleUuid, entityPortalContext.get(passengerUuid));
                     }
                 }
@@ -400,7 +408,7 @@ public class PlayerManager {
             }
         }
 
-        // STAGE 2: UPDATE PACKETS (METADATA, POSITION, EQUIPMENT, ETC.)
+        // STAGE 2: UPDATE PACKETS (POSITION, EQUIPMENT, ETC.) - METADATA IS HANDLED ON MAIN THREAD
         for (UUID uuid : entitiesToActuallyShow) {
             boolean isNew = !shownFakeEntities.contains(uuid);
             Entity realEntity = visibleRealEntities.get(uuid);
@@ -423,8 +431,8 @@ public class PlayerManager {
             ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setHeadYaw(headYawByte);
             fakeEntityFinalPackets.add(headYawPacket);
 
-            // Equipment
-            if (realEntity instanceof LivingEntity) {
+            // Equipment (only needs to be sent on spawn)
+            if (isNew && realEntity instanceof LivingEntity) {
                 LivingEntity livingEntity = (LivingEntity) realEntity;
                 List<Pair<EquipmentSlot, ItemStack>> equipmentList = new ArrayList<>();
                 for (EquipmentSlot slot : EquipmentSlot.values()) {
@@ -435,15 +443,12 @@ public class PlayerManager {
                 }
             }
 
-            // DataTracker
-            List<DataTracker.SerializedEntry<?>> trackedValues;
+            // DataTracker (only for initial spawn)
             if (isNew) {
-                trackedValues = realEntity.getDataTracker().getChangedEntries();
-            } else {
-                trackedValues = realEntity.getDataTracker().getDirtyEntries();
-            }
-            if (trackedValues != null && !trackedValues.isEmpty()) {
-                fakeEntityFinalPackets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+                List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
+                if (trackedValues != null && !trackedValues.isEmpty()) {
+                    fakeEntityFinalPackets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+                }
             }
         }
 
@@ -485,6 +490,9 @@ public class PlayerManager {
         // Update the master set of shown entities for the next tick
         shownFakeEntities.clear();
         shownFakeEntities.addAll(entitiesToActuallyShow);
+        // Mark entities for data tracker updates on the main thread
+        this.entitiesToUpdateOnMainThread = new HashMap<>(visibleRealEntities);
+
 
         Set<UUID> allInRangeUuids = nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
         hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
@@ -552,6 +560,7 @@ public class PlayerManager {
         realToFakeId.clear();
         fakeToRealId.clear();
         lastTickVehicleMap.clear();
+        entitiesToUpdateOnMainThread.clear();
 
 
         cursednessServer.addTask(() -> {
