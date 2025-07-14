@@ -6,6 +6,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.data.DataTracker;
@@ -57,10 +58,10 @@ public class PlayerManager {
     private AsyncWorldView destinationView;
     private ServerWorld currentSourceWorld;
 
-    // Data prepared on the main thread
-    private List<Entity> nearbyEntities = new ArrayList<>();
-    private List<Entity> destinationEntities = new ArrayList<>();
-    private List<Portal> portalsToProcess = new ArrayList<>();
+    // Data prepared on the main thread - marked volatile to ensure visibility from async thread
+    private volatile List<Entity> nearbyEntities = new ArrayList<>();
+    private volatile List<Entity> destinationEntities = new ArrayList<>();
+    private volatile List<Portal> portalsToProcess = new ArrayList<>();
 
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, CursednessServer cursednessServer) {
@@ -87,10 +88,9 @@ public class PlayerManager {
             portalManager.update(sourceView);
         }
         // Create snapshots for the async thread
-        this.portalsToProcess = new ArrayList<>(portalManager.getPortals());
-        // Sort portals to ensure a stable order, preventing entities from flickering
-        // between two portals they might be visible from.
-        this.portalsToProcess.sort(Comparator.comparing(Portal::getLowerLeft));
+        ArrayList<Portal> newPortals = new ArrayList<>(portalManager.getPortals());
+        newPortals.sort(Comparator.comparing(Portal::getLowerLeft));
+        this.portalsToProcess = newPortals;
         this.nearbyEntities = getEntitiesInRange(sourceWorld);
 
         // Fetch entities from destination world near portal exits and create a new list
@@ -128,6 +128,11 @@ public class PlayerManager {
             return;
         }
 
+        // Make local copies of volatile lists to ensure thread safety during this tick
+        List<Entity> nearbyEntities = this.nearbyEntities;
+        List<Entity> destinationEntities = this.destinationEntities;
+        List<Portal> portalsToProcess = this.portalsToProcess;
+
         flickerGuard.replaceAll((k, v) -> v - 1);
         flickerGuard.entrySet().removeIf(entry -> entry.getValue() <= 0);
         fakeEntityFlickerGuard.replaceAll((k, v) -> v - 1);
@@ -153,7 +158,7 @@ public class PlayerManager {
         boolean isNearPortal = false;
         var bottomOfWorld = sourceWorld.getBottomY();
 
-        for (Portal portal : this.portalsToProcess) {
+        for (Portal portal : portalsToProcess) {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
             }
@@ -195,7 +200,7 @@ public class PlayerManager {
                     layerToRender = positiveSideLayer;
                 }
 
-                for (Entity entity : this.nearbyEntities) {
+                for (Entity entity : nearbyEntities) {
                     if (layerToRender.contains(entity.getPos())) {
                         entitiesInCullingZone.add(entity.getUuid());
                     }
@@ -252,7 +257,7 @@ public class PlayerManager {
         List<Entity> entitiesToHide = new ArrayList<>();
         List<Entity> entitiesToShow = new ArrayList<>();
 
-        for (Entity entity : this.nearbyEntities) {
+        for (Entity entity : nearbyEntities) {
             UUID uuid = entity.getUuid();
             boolean shouldBeHidden = entitiesInCullingZone.contains(uuid) || fakeEntityFlickerGuard.containsKey(uuid);
             boolean isCurrentlyHidden = hiddenEntities.contains(uuid);
@@ -273,13 +278,13 @@ public class PlayerManager {
         }
 
         // Handle fake entities
-        final Map<UUID, Entity> destinationEntityMap = this.destinationEntities.stream().collect(Collectors.toMap(Entity::getUuid, e -> e, (a, b) -> a));
+        final Map<UUID, Entity> destinationEntityMap = destinationEntities.stream().collect(Collectors.toMap(Entity::getUuid, e -> e, (a, b) -> a));
 
         // Step 1: Find all entities directly visible through a portal
         Map<UUID, Entity> visibleRealEntities = new HashMap<>();
         Map<UUID, Portal> entityPortalContext = new HashMap<>();
-        for (Entity realEntity : this.destinationEntities) {
-            for (Portal portal : this.portalsToProcess) {
+        for (Entity realEntity : destinationEntities) {
+            for (Portal portal : portalsToProcess) {
                 TransformProfile transformProfile = portal.getTransformProfile();
                 if (transformProfile == null) continue;
                 Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
@@ -342,11 +347,9 @@ public class PlayerManager {
         }
 
 
-        // Step 3: Generate spawn and update packets for all visible entities
+        // Step 3: Pre-generate spawn packets for all visible entities
         Set<UUID> visibleUuids = visibleRealEntities.keySet();
         Map<UUID, Packet<?>> fakeEntitySpawnPackets = new HashMap<>();
-        Map<UUID, List<Packet<?>>> fakeEntityUpdatePackets = new HashMap<>();
-
         for (Entity realEntity : visibleRealEntities.values()) {
             UUID uuid = realEntity.getUuid();
             Portal portal = entityPortalContext.get(uuid);
@@ -354,7 +357,6 @@ public class PlayerManager {
 
             TransformProfile transformProfile = portal.getTransformProfile();
             Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
-
             int fakeId = realToFakeId.computeIfAbsent(uuid, k -> {
                 int newId = nextFakeEntityId--;
                 fakeToRealId.put(newId, k);
@@ -367,37 +369,6 @@ public class PlayerManager {
                     fakeId, realEntity.getUuid(), fakePos.x, fakePos.y, fakePos.z,
                     realEntity.getPitch(), fakeYaw, realEntity.getType(), 0,
                     transformProfile.untransformVector(realEntity.getVelocity()), fakeHeadYaw));
-
-            List<Packet<?>> updates = new ArrayList<>();
-            Vec3d fakeVel = transformProfile.untransformVector(realEntity.getVelocity());
-            updates.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
-
-            // Send head yaw updates
-            byte headYawByte = (byte) MathHelper.floor(fakeHeadYaw * 256.0F / 360.0F);
-            // We need an entity to construct the packet, but we'll overwrite the fields.
-            EntitySetHeadYawS2CPacket headYawPacket = new EntitySetHeadYawS2CPacket(realEntity, (byte)0);
-            var headYawAccessor = (EntitySetHeadYawS2CPacketAccessor) headYawPacket;
-            headYawAccessor.ic$setEntityId(fakeId);
-            headYawAccessor.ic$setHeadYaw(headYawByte);
-            updates.add(headYawPacket);
-
-            // Send equipment
-            if (realEntity instanceof LivingEntity) {
-                LivingEntity livingEntity = (LivingEntity) realEntity;
-                List<Pair<EquipmentSlot, ItemStack>> equipmentList = new ArrayList<>();
-                for (EquipmentSlot slot : EquipmentSlot.values()) {
-                    equipmentList.add(Pair.of(slot, livingEntity.getEquippedStack(slot)));
-                }
-                if (!equipmentList.isEmpty()) {
-                    updates.add(new EntityEquipmentUpdateS2CPacket(fakeId, equipmentList));
-                }
-            }
-
-            List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
-            if (trackedValues != null && !trackedValues.isEmpty()) {
-                updates.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
-            }
-            fakeEntityUpdatePackets.put(uuid, updates);
         }
 
         List<Packet<?>> fakeEntityFinalPackets = new ArrayList<>();
@@ -422,27 +393,73 @@ public class PlayerManager {
             }
         }
 
-        // Generate spawn and update packets based on the decisions
+        // STAGE 1: SPAWN PACKETS
         for (UUID uuid : entitiesToActuallyShow) {
-            if (!shownFakeEntities.contains(uuid)) { // If it wasn't shown before, it's a new spawn
+            if (!shownFakeEntities.contains(uuid)) { // isNew
                 fakeEntityFinalPackets.add(fakeEntitySpawnPackets.get(uuid));
             }
-            // Always send update packets for any entity that should be shown
-            fakeEntityFinalPackets.addAll(fakeEntityUpdatePackets.get(uuid));
         }
 
-        // Generate passenger packets, but only for vehicles that were already shown last tick
+        // STAGE 2: UPDATE PACKETS (METADATA, POSITION, EQUIPMENT, ETC.)
         for (UUID uuid : entitiesToActuallyShow) {
-            if (shownFakeEntities.contains(uuid)) { // Only send for vehicles that are not new this tick
-                Entity realVehicle = visibleRealEntities.get(uuid);
-                if (realVehicle != null) {
-                    int[] visiblePassengerIds = realVehicle.getPassengerList().stream()
-                            .map(Entity::getUuid)
-                            .filter(entitiesToActuallyShow::contains) // Passenger must also be on the "show" list
-                            .mapToInt(pUuid -> realToFakeId.getOrDefault(pUuid, 0))
-                            .filter(id -> id != 0)
-                            .toArray();
+            boolean isNew = !shownFakeEntities.contains(uuid);
+            Entity realEntity = visibleRealEntities.get(uuid);
+            Portal portal = entityPortalContext.get(uuid);
+            if (portal == null) continue;
+            TransformProfile transformProfile = portal.getTransformProfile();
+            int fakeId = realToFakeId.get(uuid);
 
+            // Position and Velocity
+            Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
+            Vec3d fakeVel = transformProfile.untransformVector(realEntity.getVelocity());
+            float fakeYaw = transformProfile.untransformYaw(realEntity.getYaw());
+            fakeEntityFinalPackets.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
+
+            // Head Yaw
+            float fakeHeadYaw = transformProfile.untransformYaw(realEntity.getHeadYaw());
+            byte headYawByte = (byte) MathHelper.floor(fakeHeadYaw * 256.0F / 360.0F);
+            EntitySetHeadYawS2CPacket headYawPacket = new EntitySetHeadYawS2CPacket(realEntity, (byte)0);
+            ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setEntityId(fakeId);
+            ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setHeadYaw(headYawByte);
+            fakeEntityFinalPackets.add(headYawPacket);
+
+            // Equipment
+            if (realEntity instanceof LivingEntity) {
+                LivingEntity livingEntity = (LivingEntity) realEntity;
+                List<Pair<EquipmentSlot, ItemStack>> equipmentList = new ArrayList<>();
+                for (EquipmentSlot slot : EquipmentSlot.values()) {
+                    equipmentList.add(Pair.of(slot, livingEntity.getEquippedStack(slot)));
+                }
+                if (!equipmentList.isEmpty()) {
+                    fakeEntityFinalPackets.add(new EntityEquipmentUpdateS2CPacket(fakeId, equipmentList));
+                }
+            }
+
+            // DataTracker
+            List<DataTracker.SerializedEntry<?>> trackedValues;
+            if (isNew) {
+                trackedValues = realEntity.getDataTracker().getChangedEntries();
+            } else {
+                trackedValues = realEntity.getDataTracker().getDirtyEntries();
+            }
+            if (trackedValues != null && !trackedValues.isEmpty()) {
+                fakeEntityFinalPackets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+            }
+        }
+
+        // STAGE 3: PASSENGER PACKETS
+        for (UUID uuid : entitiesToActuallyShow) {
+            Entity realVehicle = visibleRealEntities.get(uuid);
+            // Only send for entities that can have passengers and actually have them
+            if (realVehicle != null && realVehicle.getType() != EntityType.ITEM && !realVehicle.getPassengerList().isEmpty()) {
+                int[] visiblePassengerIds = realVehicle.getPassengerList().stream()
+                        .map(Entity::getUuid)
+                        .filter(entitiesToActuallyShow::contains)
+                        .mapToInt(pUuid -> realToFakeId.getOrDefault(pUuid, 0))
+                        .filter(id -> id != 0)
+                        .toArray();
+
+                if (visiblePassengerIds.length > 0) {
                     int fakeVehicleId = realToFakeId.get(uuid);
                     PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
                     buf.writeVarInt(fakeVehicleId);
@@ -452,7 +469,8 @@ public class PlayerManager {
             }
         }
 
-        // Generate destroy packets
+
+        // STAGE 4: DESTROY PACKETS
         if (!entitiesToActuallyDestroy.isEmpty()) {
             int[] idsToDestroy = entitiesToActuallyDestroy.stream()
                     .mapToInt(uuid -> realToFakeId.getOrDefault(uuid, 0))
@@ -468,7 +486,7 @@ public class PlayerManager {
         shownFakeEntities.clear();
         shownFakeEntities.addAll(entitiesToActuallyShow);
 
-        Set<UUID> allInRangeUuids = this.nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
+        Set<UUID> allInRangeUuids = nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
         hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
         flickerGuard.keySet().removeIf(uuid -> !allInRangeUuids.contains(uuid));
 
