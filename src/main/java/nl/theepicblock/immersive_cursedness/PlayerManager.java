@@ -169,8 +169,7 @@ public class PlayerManager {
         boolean isNearPortal = false;
         var bottomOfWorld = sourceWorld.getBottomY();
 
-        // STAGE 1: CALCULATION and PURGE
-        // First, do a "dry run" to figure out what should be visible.
+        // Refactored to a single pass for block calculation and rendering packet generation
         for (Portal portal : portalsToProcess) {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
@@ -182,9 +181,17 @@ public class PlayerManager {
             FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
             viewRects.add(portalRect);
 
+            // Render portal blocks themselves as air
             BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
                 if (portalRect.contains(portalBlockPos)) {
-                    blocksInView.increment(portalBlockPos.toImmutable());
+                    BlockPos immutablePos = portalBlockPos.toImmutable();
+                    blocksInView.increment(immutablePos);
+                    BlockState newState = Blocks.AIR.getDefaultState();
+                    BlockState cachedState = blockCache.get(immutablePos);
+                    if (cachedState == null || !cachedState.equals(newState)) {
+                        blockCache.put(immutablePos, newState);
+                        blockUpdatesToSend.put(immutablePos, newState);
+                    }
                 }
             });
 
@@ -195,7 +202,6 @@ public class PlayerManager {
             for (int i = 1; i < icConfig.portalDepth; i++) {
                 FlatStandingRectangle positiveSideLayer = portalRect.expandAbsolute(portalCoordinateOnAxis + i, playerEyePos);
                 FlatStandingRectangle negativeSideLayer = portalRect.expandAbsolute(portalCoordinateOnAxis - i, playerEyePos);
-
                 viewRects.add(positiveSideLayer);
                 viewRects.add(negativeSideLayer);
 
@@ -214,60 +220,10 @@ public class PlayerManager {
 
                 layerToRender.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
                     double distSq = portal.getDistance(pos);
-                    if (distSq <= icConfig.squaredAtmosphereRadiusPlusOne) {
-                        blocksInView.increment(pos.toImmutable());
-                    }
-                });
-            }
-        }
-
-        // Now that we know everything that *should* be visible, purge everything else from the cache.
-        blockCache.purge(blocksInView, viewRects, (pos, cachedState) -> {
-            BlockState originalState = sourceView.getBlock(pos);
-            if (!originalState.equals(cachedState)) {
-                blockUpdatesToSend.put(pos, originalState);
-                BlockEntity originalBlockEntity = sourceView.getBlockEntity(pos);
-                if (originalBlockEntity != null) {
-                    packetList.add(Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld));
-                }
-            }
-        });
-
-        // STAGE 2: RENDER
-        // Now, iterate again and send updates for what's new or has changed.
-        for (Portal portal : portalsToProcess) {
-            TransformProfile transformProfile = portal.getTransformProfile();
-            if (transformProfile == null) continue;
-            FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
-            Vec3d playerEyePos = player.getEyePos();
-            double playerCoordinateOnAxis = Util.get(playerEyePos, portalRect.getAxis());
-            double portalCoordinateOnAxis = portalRect.getOther();
-
-            // Render portal blocks
-            BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
-                if (portalRect.contains(portalBlockPos)) {
-                    BlockPos immutablePos = portalBlockPos.toImmutable();
-                    BlockState newState = Blocks.AIR.getDefaultState();
-                    BlockState cachedState = blockCache.get(immutablePos);
-                    if (cachedState == null || !cachedState.equals(newState)) {
-                        blockCache.put(immutablePos, newState);
-                        blockUpdatesToSend.put(immutablePos, newState);
-                    }
-                }
-            });
-
-            // Render view layers
-            for (int i = 1; i < icConfig.portalDepth; i++) {
-                FlatStandingRectangle layerToRender;
-                if (playerCoordinateOnAxis > portalCoordinateOnAxis) {
-                    layerToRender = portalRect.expandAbsolute(portalCoordinateOnAxis - i, playerEyePos);
-                } else {
-                    layerToRender = portalRect.expandAbsolute(portalCoordinateOnAxis + i, playerEyePos);
-                }
-
-                layerToRender.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
-                    double distSq = portal.getDistance(pos);
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) return;
+
+                    BlockPos immutablePos = pos.toImmutable();
+                    blocksInView.increment(immutablePos); // Mark this block as "in view"
 
                     BlockState newState;
                     BlockEntity newBlockEntity = null;
@@ -284,9 +240,7 @@ public class PlayerManager {
                     if (pos.getY() == bottomOfWorld + 1) newState = atmosphereBetweenBlock;
                     if (pos.getY() == bottomOfWorld) newState = atmosphereBlock;
 
-                    BlockPos immutablePos = pos.toImmutable();
                     BlockState cachedState = blockCache.get(immutablePos);
-
                     if (cachedState == null || !cachedState.equals(newState)) {
                         blockCache.put(immutablePos, newState);
                         blockUpdatesToSend.put(immutablePos, newState);
@@ -298,6 +252,18 @@ public class PlayerManager {
                 });
             }
         }
+
+        // After calculating everything in view, purge what's no longer visible
+        blockCache.purge(blocksInView, viewRects, (pos, cachedState) -> {
+            BlockState originalState = sourceView.getBlock(pos);
+            if (!originalState.equals(cachedState)) {
+                blockUpdatesToSend.put(pos, originalState);
+                BlockEntity originalBlockEntity = sourceView.getBlockEntity(pos);
+                if (originalBlockEntity != null) {
+                    packetList.add(Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld));
+                }
+            }
+        });
 
         ((PlayerInterface) player).immersivecursedness$setCloseToPortal(isNearPortal);
 
