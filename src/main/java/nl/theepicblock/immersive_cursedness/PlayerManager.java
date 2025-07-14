@@ -60,7 +60,7 @@ public class PlayerManager {
     // Data prepared on the main thread
     private List<Entity> nearbyEntities = new ArrayList<>();
     private List<Entity> destinationEntities = new ArrayList<>();
-    private Collection<Portal> portalsToProcess = new ArrayList<>();
+    private List<Portal> portalsToProcess = new ArrayList<>();
 
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, CursednessServer cursednessServer) {
@@ -88,6 +88,9 @@ public class PlayerManager {
         }
         // Create snapshots for the async thread
         this.portalsToProcess = new ArrayList<>(portalManager.getPortals());
+        // Sort portals to ensure a stable order, preventing entities from flickering
+        // between two portals they might be visible from.
+        this.portalsToProcess.sort(Comparator.comparing(Portal::getLowerLeft));
         this.nearbyEntities = getEntitiesInRange(sourceWorld);
 
         // Fetch entities from destination world near portal exits and create a new list
@@ -363,11 +366,11 @@ public class PlayerManager {
             fakeEntitySpawnPackets.put(uuid, new EntitySpawnS2CPacket(
                     fakeId, realEntity.getUuid(), fakePos.x, fakePos.y, fakePos.z,
                     realEntity.getPitch(), fakeYaw, realEntity.getType(), 0,
-                    transformProfile.untransform(realEntity.getVelocity()), fakeHeadYaw));
+                    transformProfile.untransformVector(realEntity.getVelocity()), fakeHeadYaw));
 
             List<Packet<?>> updates = new ArrayList<>();
-            updates.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, Vec3d.ZERO, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
-            updates.add(new EntityVelocityUpdateS2CPacket(fakeId, transformProfile.untransform(realEntity.getVelocity())));
+            Vec3d fakeVel = transformProfile.untransformVector(realEntity.getVelocity());
+            updates.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
 
             // Send head yaw updates
             byte headYawByte = (byte) MathHelper.floor(fakeHeadYaw * 256.0F / 360.0F);

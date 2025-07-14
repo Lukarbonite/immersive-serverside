@@ -144,6 +144,36 @@ public class TransformProfile {
         );
     }
 
+    public Vec3d untransformVector(Vec3d in) {
+        double relX = in.getX();
+        double relZ = in.getZ();
+
+        double newRelX;
+        double newRelZ;
+
+        // This is the inverse rotation logic from the transform() method
+        switch (this.rotation) {
+            case -90: // untransform of CW is CCW
+                newRelX = -relZ;
+                newRelZ = relX;
+                break;
+            case 90: // untransform of CCW is CW
+                newRelX = relZ;
+                newRelZ = -relX;
+                break;
+            case 180:
+                newRelX = -relX;
+                newRelZ = -relZ;
+                break;
+            default: // 0
+                newRelX = relX;
+                newRelZ = relZ;
+                break;
+        }
+
+        return new Vec3d(newRelX, in.getY(), newRelZ);
+    }
+
     public float untransformYaw(float in) {
         float yaw = in - this.rotation;
         while (yaw > 180) yaw -= 360;
