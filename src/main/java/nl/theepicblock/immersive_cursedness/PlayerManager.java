@@ -144,19 +144,39 @@ public class PlayerManager {
         }
     }
 
-    private void processPortalRendering(Portal portal, ServerWorld sourceWorld, List<FlatStandingRectangle> viewRects, Chunk2IntMap blocksInView, BlockUpdateMap blockUpdatesToSend, List<Packet<?>> packetList, Set<UUID> entitiesInCullingZone, List<Entity> nearbyEntities) {
+    private void processPortalRendering(Portal portal, ServerWorld sourceWorld, List<FlatStandingRectangle> viewRects, Chunk2IntMap blocksInView, BlockUpdateMap blockUpdatesToSend, List<Packet<?>> packetList, Set<UUID> entitiesInCullingZone, List<Entity> nearbyEntities, List<Vec3d[]> raycastDebugData) {
         TransformProfile transformProfile = portal.getTransformProfile();
         if (transformProfile == null) return;
 
-        final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
         final Vec3d playerEyePos = player.getEyePos();
+        final Vec3d[] tangentPoints = getTangentPoints(portal);
+        final Direction[] expectedDirections = getExpectedHitDirections(portal);
 
-        // New occlusion check based on player's line of sight to the portal corners.
-        if (isOccluded(portal, portalRect, playerEyePos, sourceView)) {
-            return;
+        Vec3d closestTangentPoint = null;
+        Direction closestExpectedDirection = null;
+        double minDistanceSq = Double.MAX_VALUE;
+
+        for (int i = 0; i < tangentPoints.length; i++) {
+            double distSq = playerEyePos.squaredDistanceTo(tangentPoints[i]);
+            if (distSq < minDistanceSq) {
+                minDistanceSq = distSq;
+                closestTangentPoint = tangentPoints[i];
+                closestExpectedDirection = expectedDirections[i];
+            }
         }
 
-        // Check if the player is on the same block plane as the portal. If so, cull rendering.
+        if (closestTangentPoint != null) {
+            if (isOccluded(portal, playerEyePos, closestTangentPoint, closestExpectedDirection, sourceView)) {
+                return;
+            }
+
+            final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
+            if (debugEnabled) {
+                raycastDebugData.add(new Vec3d[]{playerEyePos, closestTangentPoint});
+            }
+        }
+
+        final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
         int playerBlockCoordinate = (int)Math.floor(Util.get(player.getPos(), portalRect.getAxis()));
         int portalBlockCoordinate = (int)Math.round(portalRect.getOther());
         if (playerBlockCoordinate == portalBlockCoordinate) {
@@ -184,9 +204,6 @@ public class PlayerManager {
             }
         });
 
-        // Cull any source-world entity that is inside the frustum where the destination world will be rendered.
-        // This hides entities that are behind the portal, making way for the destination view,
-        // while leaving entities between the player and the portal visible to obstruct the view.
         for (Entity entity : nearbyEntities) {
             if (viewFrustum.contains(entity.getPos())) {
                 entitiesInCullingZone.add(entity.getUuid());
@@ -246,7 +263,6 @@ public class PlayerManager {
             });
 
             cullLayer.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, new Util.WorldHeights(sourceView.getBottomY(), sourceView.getTopYInclusive()), (pos) -> {
-                // Corrected Culling Check: Use containsInSidePlanes
                 if (viewFrustum.containsInSidePlanes(pos.toCenterPos())) {
                     BlockPos immutablePos = pos.toImmutable();
                     blocksInView.increment(immutablePos);
@@ -261,65 +277,87 @@ public class PlayerManager {
         }
     }
 
-    /**
-     * Checks if the player's view of the portal is occluded by the portal's own frame.
-     * This is done by casting rays from the player's eyes to the four corners of the portal opening.
-     * If a ray hits a frame block that is not part of the corner itself, it's considered occluded.
-     */
-    private boolean isOccluded(Portal portal, FlatStandingRectangle portalRect, Vec3d playerEyePos, AsyncWorldView worldView) {
-        Vec3d[] corners = {
-                portalRect.getTopLeft(),
-                portalRect.getTopRight(),
-                portalRect.getBottomLeft(),
-                portalRect.getBottomRight()
-        };
+    private boolean isOccluded(Portal portal, Vec3d playerEyePos, Vec3d tangentPoint, Direction expectedDirection, AsyncWorldView worldView) {
+        if (player.getBlockPos().isWithinDistance(BlockPos.ofFloored(tangentPoint), 2.0)) {
+            return false;
+        }
 
-        for (Vec3d corner : corners) {
-            // Identify the set of frame blocks that are expected to be hit when looking at this corner.
-            Set<BlockPos> expectedBlocks = getFrameBlocksAtCorner(corner, portal, worldView);
+        RaycastContext context = new RaycastContext(
+                playerEyePos,
+                tangentPoint,
+                RaycastContext.ShapeType.COLLIDER,
+                RaycastContext.FluidHandling.NONE,
+                player
+        );
+        BlockHitResult hitResult = worldView.raycast(context);
 
-            // Don't check for occlusion if the player is inside one of the expected blocks.
-            if (expectedBlocks.contains(player.getBlockPos())) {
-                continue;
-            }
-
-            RaycastContext context = new RaycastContext(
-                    playerEyePos,
-                    corner,
-                    RaycastContext.ShapeType.COLLIDER,
-                    RaycastContext.FluidHandling.NONE,
-                    player
-            );
-            BlockHitResult hitResult = worldView.raycast(context);
-
-            if (hitResult.getType() == HitResult.Type.BLOCK) {
-                BlockPos hitPos = hitResult.getBlockPos();
-                // If the ray hits a frame block, and it's not one of the blocks making up the corner,
-                // then the view to that corner is occluded by another part of the frame.
-                if (isFrameBlock(hitPos, portal, worldView) && !expectedBlocks.contains(hitPos)) {
-                    return true; // Occlusion detected
+        if (hitResult.getType() == HitResult.Type.BLOCK) {
+            BlockPos hitPos = hitResult.getBlockPos();
+            if (isFrameBlock(hitPos, portal, worldView)) {
+                if (hitResult.getSide() != expectedDirection) {
+                    return true;
                 }
             }
         }
 
-        return false; // No occlusion found
+        return false;
     }
 
-    /**
-     * Determines if a block at a given position is part of the portal's frame.
-     * A frame block must be a full cube and be located on the perimeter of the portal blocks.
-     */
+    private Vec3d[] getTangentPoints(Portal portal) {
+        Direction.Axis contentAxis = portal.getAxis();
+        Direction.Axis planeAxis = Util.rotate(contentAxis);
+
+        double planeCoord = Util.get(portal.getLowerLeft(), planeAxis) + 0.5;
+
+        double topY = portal.getTop() + 1.0;
+        double bottomY = portal.getBottom();
+        double left = portal.getLeft();
+        double right = portal.getRight() + 1.0;
+
+        double midAxis = (left + right) / 2.0;
+        double midY = (bottomY + topY) / 2.0;
+
+        Vec3d[] points = new Vec3d[4];
+        if (planeAxis == Direction.Axis.X) {
+            points[0] = new Vec3d(planeCoord, topY, midAxis); // Top
+            points[1] = new Vec3d(planeCoord, bottomY, midAxis); // Bottom
+            points[2] = new Vec3d(planeCoord, midY, left); // Left
+            points[3] = new Vec3d(planeCoord, midY, right); // Right
+        } else {
+            points[0] = new Vec3d(midAxis, topY, planeCoord); // Top
+            points[1] = new Vec3d(midAxis, bottomY, planeCoord); // Bottom
+            points[2] = new Vec3d(left, midY, planeCoord); // Left
+            points[3] = new Vec3d(right, midY, planeCoord); // Right
+        }
+        return points;
+    }
+
+    private Direction[] getExpectedHitDirections(Portal portal) {
+        Direction.Axis contentAxis = portal.getAxis();
+        Direction[] dirs = new Direction[4];
+        dirs[0] = Direction.DOWN;
+        dirs[1] = Direction.UP;
+        if (contentAxis == Direction.Axis.X) {
+            dirs[2] = Direction.SOUTH;
+            dirs[3] = Direction.NORTH;
+        } else {
+            dirs[2] = Direction.EAST;
+            dirs[3] = Direction.WEST;
+        }
+        return dirs;
+    }
+
     private boolean isFrameBlock(BlockPos pos, Portal portal, AsyncWorldView worldView) {
         if (!worldView.getBlock(pos).isFullCube(worldView, pos)) {
             return false;
         }
 
-        Direction.Axis portalContentAxis = portal.getAxis(); // The axis of the portal's width/height (e.g., X or Z for a nether portal)
-        Direction.Axis portalPlaneAxis = Util.rotate(portalContentAxis); // The axis perpendicular to the portal plane.
+        Direction.Axis portalContentAxis = portal.getAxis();
+        Direction.Axis portalPlaneAxis = Util.rotate(portalContentAxis);
 
         int portalPlaneCoordinate = Util.get(portal.getLowerLeft(), portalPlaneAxis);
         if (Util.get(pos, portalPlaneAxis) != portalPlaneCoordinate) {
-            return false; // Not on the same plane as the portal frame.
+            return false;
         }
 
         int topY = portal.getTop() + 1;
@@ -330,41 +368,15 @@ public class PlayerManager {
         int y = pos.getY();
         int axisCoord = Util.get(pos, portalContentAxis);
 
-        // Check if the block is on the top or bottom edge of the frame
         if ((y == topY || y == bottomY) && (axisCoord >= left && axisCoord <= right)) {
             return true;
         }
 
-        // Check if the block is on the left or right edge of the frame
         return (axisCoord == left || axisCoord == right) && (y >= bottomY && y <= topY);
     }
 
-    /**
-     * Gets the set of frame blocks that meet at a given corner of the portal opening.
-     * A corner point can be at the junction of up to 8 blocks.
-     */
-    private Set<BlockPos> getFrameBlocksAtCorner(Vec3d corner, Portal portal, AsyncWorldView worldView) {
-        Set<BlockPos> cornerBlocks = new HashSet<>();
-        BlockPos center = BlockPos.ofFloored(corner);
-        BlockPos.Mutable mutable = new BlockPos.Mutable();
-
-        for (int dx = -1; dx <= 0; dx++) {
-            for (int dy = -1; dy <= 0; dy++) {
-                for (int dz = -1; dz <= 0; dz++) {
-                    mutable.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
-                    if (isFrameBlock(mutable, portal, worldView)) {
-                        cornerBlocks.add(mutable.toImmutable());
-                    }
-                }
-            }
-        }
-        return cornerBlocks;
-    }
-
-
     public void tickAsync(int tickCount) {
         if (!((PlayerInterface) player).immersivecursedness$getEnabled() || player.isSleeping()) {
-            // Ensure any lingering debug entities are removed when the mod is disabled
             if (isDebugCleanupNeeded()) {
                 cursednessServer.addTask(this::purgeDebugEntities);
             }
@@ -403,7 +415,7 @@ public class PlayerManager {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
             }
-            processPortalRendering(portal, sourceWorld, viewRects, blocksInView, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities);
+            processPortalRendering(portal, sourceWorld, viewRects, blocksInView, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities, currentRaycastDebugData);
 
             if (debugEnabled) {
                 final Vec3d playerEyePos = player.getEyePos();
@@ -412,12 +424,6 @@ public class PlayerManager {
                 currentDebugPoints.add(frustumShape.getTopRight());
                 currentDebugPoints.add(frustumShape.getBottomLeft());
                 currentDebugPoints.add(frustumShape.getBottomRight());
-
-                final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
-                Vec3d[] corners = { portalRect.getTopLeft(), portalRect.getTopRight(), portalRect.getBottomLeft(), portalRect.getBottomRight() };
-                for (Vec3d corner : corners) {
-                    currentRaycastDebugData.add(new Vec3d[]{playerEyePos, corner});
-                }
             }
         }
 
@@ -434,7 +440,6 @@ public class PlayerManager {
 
         ((PlayerInterface) player).immersivecursedness$setCloseToPortal(isNearPortal);
 
-        // Entity culling/un-culling
         List<Entity> entitiesToHide = new ArrayList<>();
         List<Entity> entitiesToShow = new ArrayList<>();
         for (Entity entity : nearbyEntities) {
@@ -463,7 +468,6 @@ public class PlayerManager {
 
         processFakeEntities(packetsToSend, destinationEntityMap, portalsToProcess);
 
-        // Debug entities
         if (debugEnabled) {
             updateDebugEntities(packetsToSend, currentDebugPoints, currentRaycastDebugData);
         } else if (isDebugCleanupNeeded()) {
@@ -732,7 +736,7 @@ public class PlayerManager {
             Vector3f translation = new Vector3f(0.0f, 0.0f, 0.0f);
             Quaternionf leftRotation = new Quaternionf().rotationTo(new Vector3f(0.0f, 0.0f, 1.0f), new Vector3f((float)dir.x, (float)dir.y, (float)dir.z));
             Vector3f scale = new Vector3f(0.05f, 0.05f, length);
-            Quaternionf rightRotation = new Quaternionf(); // Identity
+            Quaternionf rightRotation = new Quaternionf();
             AffineTransformation transform = new AffineTransformation(translation, leftRotation, scale, rightRotation);
 
             tempDisplay.setTransformation(transform);
