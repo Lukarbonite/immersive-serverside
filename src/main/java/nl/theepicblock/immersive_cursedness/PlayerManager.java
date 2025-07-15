@@ -82,6 +82,8 @@ public class PlayerManager {
     private volatile List<Portal> portalsToProcess = new ArrayList<>();
     private volatile Map<UUID, Entity> entitiesToUpdateOnMainThread = new HashMap<>();
 
+    private enum FramePart { TOP, BOTTOM, LEFT, RIGHT, NONE }
+
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, CursednessServer cursednessServer) {
         this.player = player;
@@ -148,34 +150,11 @@ public class PlayerManager {
         TransformProfile transformProfile = portal.getTransformProfile();
         if (transformProfile == null) return;
 
+        if (isOccludedByOppositeFrame(portal, sourceView, raycastDebugData)) {
+            return;
+        }
+
         final Vec3d playerEyePos = player.getEyePos();
-        final Vec3d[] tangentPoints = getTangentPoints(portal, playerEyePos);
-        final Direction[] expectedDirections = getExpectedHitDirections(portal);
-
-        Vec3d closestTangentPoint = null;
-        Direction closestExpectedDirection = null;
-        double minDistanceSq = Double.MAX_VALUE;
-
-        for (int i = 0; i < tangentPoints.length; i++) {
-            double distSq = playerEyePos.squaredDistanceTo(tangentPoints[i]);
-            if (distSq < minDistanceSq) {
-                minDistanceSq = distSq;
-                closestTangentPoint = tangentPoints[i];
-                closestExpectedDirection = expectedDirections[i];
-            }
-        }
-
-        if (closestTangentPoint != null) {
-            if (isOccluded(portal, playerEyePos, closestTangentPoint, closestExpectedDirection, sourceView)) {
-                return;
-            }
-
-            final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
-            if (debugEnabled) {
-                raycastDebugData.add(new Vec3d[]{playerEyePos, closestTangentPoint});
-            }
-        }
-
         final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
         int playerBlockCoordinate = (int)Math.floor(Util.get(player.getPos(), portalRect.getAxis()));
         int portalBlockCoordinate = (int)Math.round(portalRect.getOther());
@@ -277,25 +256,48 @@ public class PlayerManager {
         }
     }
 
-    private boolean isOccluded(Portal portal, Vec3d playerEyePos, Vec3d tangentPoint, Direction expectedDirection, AsyncWorldView worldView) {
-        if (player.getBlockPos().isWithinDistance(BlockPos.ofFloored(tangentPoint), 2.0)) {
+    private boolean isOccludedByOppositeFrame(Portal portal, AsyncWorldView worldView, List<Vec3d[]> raycastDebugData) {
+        final Vec3d playerEyePos = player.getEyePos();
+        final Vec3d[] tangentPoints = getTangentPoints(portal, playerEyePos);
+
+        Vec3d closestTangentPoint = null;
+        int closestTangentIndex = -1;
+        double minDistanceSq = Double.MAX_VALUE;
+
+        for (int i = 0; i < tangentPoints.length; i++) {
+            double distSq = playerEyePos.squaredDistanceTo(tangentPoints[i]);
+            if (distSq < minDistanceSq) {
+                minDistanceSq = distSq;
+                closestTangentPoint = tangentPoints[i];
+                closestTangentIndex = i;
+            }
+        }
+
+        if (closestTangentPoint == null) {
             return false;
         }
 
-        RaycastContext context = new RaycastContext(
-                playerEyePos,
-                tangentPoint,
-                RaycastContext.ShapeType.COLLIDER,
-                RaycastContext.FluidHandling.NONE,
-                player
-        );
+        Vec3d direction = closestTangentPoint.subtract(playerEyePos);
+        if (direction.lengthSquared() < 1e-7) return false;
+        direction = direction.normalize();
+        Vec3d extendedEndPoint = closestTangentPoint.add(direction.multiply(10.0));
+
+        final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
+        if (debugEnabled) {
+            raycastDebugData.add(new Vec3d[]{playerEyePos, extendedEndPoint});
+        }
+
+        RaycastContext context = new RaycastContext(playerEyePos, extendedEndPoint, RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, player);
         BlockHitResult hitResult = worldView.raycast(context);
 
         if (hitResult.getType() == HitResult.Type.BLOCK) {
-            BlockPos hitPos = hitResult.getBlockPos();
-            if (isFrameBlock(hitPos, portal, worldView)) {
-                if (hitResult.getSide() != expectedDirection) {
-                    return true;
+            FramePart hitPart = getFramePart(hitResult.getBlockPos(), portal, worldView);
+            if (hitPart != FramePart.NONE) {
+                switch (closestTangentIndex) {
+                    case 0: return hitPart == FramePart.BOTTOM;
+                    case 1: return hitPart == FramePart.TOP;
+                    case 2: return hitPart == FramePart.RIGHT;
+                    case 3: return hitPart == FramePart.LEFT;
                 }
             }
         }
@@ -341,21 +343,6 @@ public class PlayerManager {
         return points;
     }
 
-    private Direction[] getExpectedHitDirections(Portal portal) {
-        Direction.Axis contentAxis = portal.getAxis();
-        Direction[] dirs = new Direction[4];
-        dirs[0] = Direction.DOWN;
-        dirs[1] = Direction.UP;
-        if (contentAxis == Direction.Axis.X) {
-            dirs[2] = Direction.SOUTH;
-            dirs[3] = Direction.NORTH;
-        } else {
-            dirs[2] = Direction.EAST;
-            dirs[3] = Direction.WEST;
-        }
-        return dirs;
-    }
-
     private boolean isFrameBlock(BlockPos pos, Portal portal, AsyncWorldView worldView) {
         if (!worldView.getBlock(pos).isFullCube(worldView, pos)) {
             return false;
@@ -382,6 +369,29 @@ public class PlayerManager {
         }
 
         return (axisCoord == left || axisCoord == right) && (y >= bottomY && y <= topY);
+    }
+
+    private FramePart getFramePart(BlockPos pos, Portal portal, AsyncWorldView worldView) {
+        if (!isFrameBlock(pos, portal, worldView)) {
+            return FramePart.NONE;
+        }
+
+        Direction.Axis contentAxis = portal.getAxis();
+
+        int topY = portal.getTop() + 1;
+        int bottomY = portal.getBottom() - 1;
+        int left = portal.getLeft() - 1;
+        int right = portal.getRight() + 1;
+
+        int y = pos.getY();
+        int axisCoord = Util.get(pos, contentAxis);
+
+        if (y == topY) return FramePart.TOP;
+        if (y == bottomY) return FramePart.BOTTOM;
+        if (axisCoord == left) return FramePart.LEFT;
+        if (axisCoord == right) return FramePart.RIGHT;
+
+        return FramePart.NONE;
     }
 
     public void tickAsync(int tickCount) {
