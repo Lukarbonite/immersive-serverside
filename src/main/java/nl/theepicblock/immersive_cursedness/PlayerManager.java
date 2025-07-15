@@ -149,7 +149,7 @@ public class PlayerManager {
         if (transformProfile == null) return;
 
         final Vec3d playerEyePos = player.getEyePos();
-        final Vec3d[] tangentPoints = getTangentPoints(portal);
+        final Vec3d[] tangentPoints = getTangentPoints(portal, playerEyePos);
         final Direction[] expectedDirections = getExpectedHitDirections(portal);
 
         Vec3d closestTangentPoint = null;
@@ -303,31 +303,40 @@ public class PlayerManager {
         return false;
     }
 
-    private Vec3d[] getTangentPoints(Portal portal) {
+    private Vec3d[] getTangentPoints(Portal portal, Vec3d playerEyePos) {
         Direction.Axis contentAxis = portal.getAxis();
         Direction.Axis planeAxis = Util.rotate(contentAxis);
+        final double epsilon = 1.0E-5;
 
-        double planeCoord = Util.get(portal.getLowerLeft(), planeAxis) + 0.5;
+        double portalCenterOnPlaneAxis = Util.get(portal.getLowerLeft(), planeAxis) + 0.5;
+        double playerPosOnPlaneAxis = Util.get(playerEyePos, planeAxis);
+
+        double targetPlaneCoord;
+        if (playerPosOnPlaneAxis > portalCenterOnPlaneAxis) {
+            targetPlaneCoord = portalCenterOnPlaneAxis + 0.5;
+        } else {
+            targetPlaneCoord = portalCenterOnPlaneAxis - 0.5;
+        }
 
         double topY = portal.getTop() + 1.0;
         double bottomY = portal.getBottom();
         double left = portal.getLeft();
         double right = portal.getRight() + 1.0;
 
-        double midAxis = (left + right) / 2.0;
+        double midContentAxis = (left + right) / 2.0;
         double midY = (bottomY + topY) / 2.0;
 
         Vec3d[] points = new Vec3d[4];
         if (planeAxis == Direction.Axis.X) {
-            points[0] = new Vec3d(planeCoord, topY, midAxis); // Top
-            points[1] = new Vec3d(planeCoord, bottomY, midAxis); // Bottom
-            points[2] = new Vec3d(planeCoord, midY, left); // Left
-            points[3] = new Vec3d(planeCoord, midY, right); // Right
+            points[0] = new Vec3d(targetPlaneCoord, topY - epsilon, midContentAxis);      // Top
+            points[1] = new Vec3d(targetPlaneCoord, bottomY + epsilon, midContentAxis);   // Bottom
+            points[2] = new Vec3d(targetPlaneCoord, midY, left + epsilon);               // Left
+            points[3] = new Vec3d(targetPlaneCoord, midY, right - epsilon);              // Right
         } else {
-            points[0] = new Vec3d(midAxis, topY, planeCoord); // Top
-            points[1] = new Vec3d(midAxis, bottomY, planeCoord); // Bottom
-            points[2] = new Vec3d(left, midY, planeCoord); // Left
-            points[3] = new Vec3d(right, midY, planeCoord); // Right
+            points[0] = new Vec3d(midContentAxis, topY - epsilon, targetPlaneCoord);      // Top
+            points[1] = new Vec3d(midContentAxis, bottomY + epsilon, targetPlaneCoord);   // Bottom
+            points[2] = new Vec3d(left + epsilon, midY, targetPlaneCoord);               // Left
+            points[3] = new Vec3d(right - epsilon, midY, targetPlaneCoord);              // Right
         }
         return points;
     }
