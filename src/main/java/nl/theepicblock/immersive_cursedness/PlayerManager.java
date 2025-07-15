@@ -9,8 +9,8 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.data.DataTracker;
+import net.minecraft.entity.decoration.DisplayEntity;
 import net.minecraft.entity.passive.ChickenEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerPosition;
@@ -22,15 +22,22 @@ import net.minecraft.server.network.EntityTrackerEntry;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.TypeFilter;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.AffineTransformation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.GameRules;
+import net.minecraft.world.RaycastContext;
 import net.minecraft.world.World;
 import nl.theepicblock.immersive_cursedness.mixin.EntitySetHeadYawS2CPacketAccessor;
 import nl.theepicblock.immersive_cursedness.objects.*;
 import org.jetbrains.annotations.Nullable;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,6 +55,9 @@ public class PlayerManager {
     // For debug entities
     private final List<Integer> debugEntityIds = new ArrayList<>();
     private final Map<Integer, UUID> debugEntityUuids = new HashMap<>();
+    private final List<Integer> raycastDebugEntityIds = new ArrayList<>();
+    private final Map<Integer, UUID> raycastDebugEntityUuids = new HashMap<>();
+
 
     // For fake entities
     private final Map<UUID, Integer> realToFakeId = new ConcurrentHashMap<>();
@@ -55,6 +65,7 @@ public class PlayerManager {
     private final Set<UUID> shownFakeEntities = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> fakeEntityFlickerGuard = new ConcurrentHashMap<>();
     private int nextFakeEntityId = -1000000;
+    private int nextRaycastDebugEntityId = -2000000;
 
     // For vehicle dismount grace period
     private final Map<UUID, UUID> lastTickVehicleMap = new ConcurrentHashMap<>();
@@ -138,6 +149,12 @@ public class PlayerManager {
         if (transformProfile == null) return;
 
         final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
+        final Vec3d playerEyePos = player.getEyePos();
+
+        // New occlusion check based on player's line of sight to the portal corners.
+        if (isOccluded(portal, portalRect, playerEyePos, sourceView)) {
+            return;
+        }
 
         // Check if the player is on the same block plane as the portal. If so, cull rendering.
         int playerBlockCoordinate = (int)Math.floor(Util.get(player.getPos(), portalRect.getAxis()));
@@ -146,9 +163,7 @@ public class PlayerManager {
             return;
         }
 
-        final Vec3d playerEyePos = player.getEyePos();
-        final FlatStandingRectangle frustumShape = portal.getFrustumShape(playerEyePos);
-        final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, frustumShape);
+        final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, portal.getFrustumShape(playerEyePos));
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
         final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
@@ -246,14 +261,119 @@ public class PlayerManager {
         }
     }
 
+    /**
+     * Checks if the player's view of the portal is occluded by the portal's own frame.
+     * This is done by casting rays from the player's eyes to the four corners of the portal opening.
+     * If a ray hits a frame block that is not part of the corner itself, it's considered occluded.
+     */
+    private boolean isOccluded(Portal portal, FlatStandingRectangle portalRect, Vec3d playerEyePos, AsyncWorldView worldView) {
+        Vec3d[] corners = {
+                portalRect.getTopLeft(),
+                portalRect.getTopRight(),
+                portalRect.getBottomLeft(),
+                portalRect.getBottomRight()
+        };
+
+        for (Vec3d corner : corners) {
+            // Identify the set of frame blocks that are expected to be hit when looking at this corner.
+            Set<BlockPos> expectedBlocks = getFrameBlocksAtCorner(corner, portal, worldView);
+
+            // Don't check for occlusion if the player is inside one of the expected blocks.
+            if (expectedBlocks.contains(player.getBlockPos())) {
+                continue;
+            }
+
+            RaycastContext context = new RaycastContext(
+                    playerEyePos,
+                    corner,
+                    RaycastContext.ShapeType.COLLIDER,
+                    RaycastContext.FluidHandling.NONE,
+                    player
+            );
+            BlockHitResult hitResult = worldView.raycast(context);
+
+            if (hitResult.getType() == HitResult.Type.BLOCK) {
+                BlockPos hitPos = hitResult.getBlockPos();
+                // If the ray hits a frame block, and it's not one of the blocks making up the corner,
+                // then the view to that corner is occluded by another part of the frame.
+                if (isFrameBlock(hitPos, portal, worldView) && !expectedBlocks.contains(hitPos)) {
+                    return true; // Occlusion detected
+                }
+            }
+        }
+
+        return false; // No occlusion found
+    }
+
+    /**
+     * Determines if a block at a given position is part of the portal's frame.
+     * A frame block must be a full cube and be located on the perimeter of the portal blocks.
+     */
+    private boolean isFrameBlock(BlockPos pos, Portal portal, AsyncWorldView worldView) {
+        if (!worldView.getBlock(pos).isFullCube(worldView, pos)) {
+            return false;
+        }
+
+        Direction.Axis portalContentAxis = portal.getAxis(); // The axis of the portal's width/height (e.g., X or Z for a nether portal)
+        Direction.Axis portalPlaneAxis = Util.rotate(portalContentAxis); // The axis perpendicular to the portal plane.
+
+        int portalPlaneCoordinate = Util.get(portal.getLowerLeft(), portalPlaneAxis);
+        if (Util.get(pos, portalPlaneAxis) != portalPlaneCoordinate) {
+            return false; // Not on the same plane as the portal frame.
+        }
+
+        int topY = portal.getTop() + 1;
+        int bottomY = portal.getBottom() - 1;
+        int left = portal.getLeft() - 1;
+        int right = portal.getRight() + 1;
+
+        int y = pos.getY();
+        int axisCoord = Util.get(pos, portalContentAxis);
+
+        // Check if the block is on the top or bottom edge of the frame
+        if ((y == topY || y == bottomY) && (axisCoord >= left && axisCoord <= right)) {
+            return true;
+        }
+
+        // Check if the block is on the left or right edge of the frame
+        return (axisCoord == left || axisCoord == right) && (y >= bottomY && y <= topY);
+    }
+
+    /**
+     * Gets the set of frame blocks that meet at a given corner of the portal opening.
+     * A corner point can be at the junction of up to 8 blocks.
+     */
+    private Set<BlockPos> getFrameBlocksAtCorner(Vec3d corner, Portal portal, AsyncWorldView worldView) {
+        Set<BlockPos> cornerBlocks = new HashSet<>();
+        BlockPos center = BlockPos.ofFloored(corner);
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+
+        for (int dx = -1; dx <= 0; dx++) {
+            for (int dy = -1; dy <= 0; dy++) {
+                for (int dz = -1; dz <= 0; dz++) {
+                    mutable.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+                    if (isFrameBlock(mutable, portal, worldView)) {
+                        cornerBlocks.add(mutable.toImmutable());
+                    }
+                }
+            }
+        }
+        return cornerBlocks;
+    }
+
+
     public void tickAsync(int tickCount) {
         if (!((PlayerInterface) player).immersivecursedness$getEnabled() || player.isSleeping()) {
+            // Ensure any lingering debug entities are removed when the mod is disabled
+            if (isDebugCleanupNeeded()) {
+                cursednessServer.addTask(this::purgeDebugEntities);
+            }
             return;
         }
 
-        List<Entity> nearbyEntities = this.nearbyEntities;
-        Map<UUID, Entity> destinationEntityMap = this.destinationEntityMap;
-        List<Portal> portalsToProcess = this.portalsToProcess;
+        final List<Entity> nearbyEntities = this.nearbyEntities;
+        final Map<UUID, Entity> destinationEntityMap = this.destinationEntityMap;
+        final List<Portal> portalsToProcess = this.portalsToProcess;
 
         flickerGuard.replaceAll((k, v) -> v - 1);
         flickerGuard.entrySet().removeIf(entry -> entry.getValue() <= 0);
@@ -268,21 +388,22 @@ public class PlayerManager {
             return;
         }
 
-        List<FlatStandingRectangle> viewRects = new ArrayList<>();
-        Chunk2IntMap blocksInView = new Chunk2IntMap();
-        BlockUpdateMap blockUpdatesToSend = new BlockUpdateMap();
-        List<Packet<?>> packetList = new ArrayList<>();
-        Set<UUID> entitiesInCullingZone = new HashSet<>();
+        final List<Packet<?>> packetsToSend = new ArrayList<>();
+        final BlockUpdateMap blockUpdatesToSend = new BlockUpdateMap();
+        final List<FlatStandingRectangle> viewRects = new ArrayList<>();
+        final Chunk2IntMap blocksInView = new Chunk2IntMap();
+        final Set<UUID> entitiesInCullingZone = new HashSet<>();
         boolean isNearPortal = false;
 
-        List<Vec3d> currentDebugPoints = new ArrayList<>();
-        boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
+        final List<Vec3d> currentDebugPoints = new ArrayList<>();
+        final List<Vec3d[]> currentRaycastDebugData = new ArrayList<>();
+        final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
 
         for (Portal portal : portalsToProcess) {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
             }
-            processPortalRendering(portal, sourceWorld, viewRects, blocksInView, blockUpdatesToSend, packetList, entitiesInCullingZone, nearbyEntities);
+            processPortalRendering(portal, sourceWorld, viewRects, blocksInView, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities);
 
             if (debugEnabled) {
                 final Vec3d playerEyePos = player.getEyePos();
@@ -291,6 +412,12 @@ public class PlayerManager {
                 currentDebugPoints.add(frustumShape.getTopRight());
                 currentDebugPoints.add(frustumShape.getBottomLeft());
                 currentDebugPoints.add(frustumShape.getBottomRight());
+
+                final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
+                Vec3d[] corners = { portalRect.getTopLeft(), portalRect.getTopRight(), portalRect.getBottomLeft(), portalRect.getBottomRight() };
+                for (Vec3d corner : corners) {
+                    currentRaycastDebugData.add(new Vec3d[]{playerEyePos, corner});
+                }
             }
         }
 
@@ -300,13 +427,14 @@ public class PlayerManager {
                 blockUpdatesToSend.put(pos, originalState);
                 BlockEntity originalBlockEntity = sourceView.getBlockEntity(pos);
                 if (originalBlockEntity != null) {
-                    packetList.add(Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld));
+                    packetsToSend.add(Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld));
                 }
             }
         });
 
         ((PlayerInterface) player).immersivecursedness$setCloseToPortal(isNearPortal);
 
+        // Entity culling/un-culling
         List<Entity> entitiesToHide = new ArrayList<>();
         List<Entity> entitiesToShow = new ArrayList<>();
         for (Entity entity : nearbyEntities) {
@@ -328,7 +456,28 @@ public class PlayerManager {
                 }
             }
         }
+        entitiesToHide.forEach(e -> packetsToSend.add(Util.createEntityHidePacket(e.getId())));
+        for (Entity entity : entitiesToShow) {
+            new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {}).sendPackets(player, packetsToSend::add);
+        }
 
+        processFakeEntities(packetsToSend, destinationEntityMap, portalsToProcess);
+
+        // Debug entities
+        if (debugEnabled) {
+            updateDebugEntities(packetsToSend, currentDebugPoints, currentRaycastDebugData);
+        } else if (isDebugCleanupNeeded()) {
+            purgeDebugEntities(packetsToSend);
+        }
+
+        cursednessServer.addTask(() -> {
+            if (!player.networkHandler.isConnectionOpen()) return;
+            blockUpdatesToSend.sendTo(player);
+            packetsToSend.forEach(p -> player.networkHandler.sendPacket(p));
+        });
+    }
+
+    private void processFakeEntities(List<Packet<?>> packetsToSend, Map<UUID, Entity> destinationEntityMap, List<Portal> portalsToProcess) {
         Map<UUID, Entity> visibleRealEntities = new HashMap<>();
         Map<UUID, Portal> entityPortalContext = new HashMap<>();
         for (Entity realEntity : destinationEntityMap.values()) {
@@ -401,7 +550,6 @@ public class PlayerManager {
             fakeEntitySpawnPackets.put(uuid, new EntitySpawnS2CPacket(fakeId, realEntity.getUuid(), fakePos.x, fakePos.y, fakePos.z, realEntity.getPitch(), fakeYaw, realEntity.getType(), 0, transformProfile.untransformVector(realEntity.getVelocity()), fakeHeadYaw));
         }
 
-        List<Packet<?>> fakeEntityFinalPackets = new ArrayList<>();
         Set<UUID> entitiesToActuallyShow = new HashSet<>();
         Set<UUID> entitiesToActuallyDestroy = new HashSet<>();
         for (UUID uuid : visibleUuids) {
@@ -421,7 +569,7 @@ public class PlayerManager {
 
         for (UUID uuid : entitiesToActuallyShow) {
             if (!shownFakeEntities.contains(uuid)) {
-                fakeEntityFinalPackets.add(fakeEntitySpawnPackets.get(uuid));
+                packetsToSend.add(fakeEntitySpawnPackets.get(uuid));
             }
         }
 
@@ -435,13 +583,13 @@ public class PlayerManager {
             Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
             Vec3d fakeVel = transformProfile.untransformVector(realEntity.getVelocity());
             float fakeYaw = transformProfile.untransformYaw(realEntity.getYaw());
-            fakeEntityFinalPackets.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
+            packetsToSend.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
             float fakeHeadYaw = transformProfile.untransformYaw(realEntity.getHeadYaw());
             byte headYawByte = (byte) MathHelper.floor(fakeHeadYaw * 256.0F / 360.0F);
             EntitySetHeadYawS2CPacket headYawPacket = new EntitySetHeadYawS2CPacket(realEntity, (byte)0);
             ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setEntityId(fakeId);
             ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setHeadYaw(headYawByte);
-            fakeEntityFinalPackets.add(headYawPacket);
+            packetsToSend.add(headYawPacket);
 
             if (isNew && realEntity instanceof LivingEntity) {
                 LivingEntity livingEntity = (LivingEntity) realEntity;
@@ -450,13 +598,13 @@ public class PlayerManager {
                     equipmentList.add(Pair.of(slot, livingEntity.getEquippedStack(slot)));
                 }
                 if (!equipmentList.isEmpty()) {
-                    fakeEntityFinalPackets.add(new EntityEquipmentUpdateS2CPacket(fakeId, equipmentList));
+                    packetsToSend.add(new EntityEquipmentUpdateS2CPacket(fakeId, equipmentList));
                 }
             }
             if (isNew) {
                 List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
                 if (trackedValues != null && !trackedValues.isEmpty()) {
-                    fakeEntityFinalPackets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+                    packetsToSend.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
                 }
             }
         }
@@ -470,7 +618,7 @@ public class PlayerManager {
                     PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
                     buf.writeVarInt(fakeVehicleId);
                     buf.writeIntArray(visiblePassengerIds);
-                    fakeEntityFinalPackets.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
+                    packetsToSend.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
                 }
             }
         }
@@ -478,7 +626,7 @@ public class PlayerManager {
         if (!entitiesToActuallyDestroy.isEmpty()) {
             int[] idsToDestroy = entitiesToActuallyDestroy.stream().mapToInt(uuid -> realToFakeId.getOrDefault(uuid, 0)).filter(id -> id != 0).toArray();
             if (idsToDestroy.length > 0) {
-                fakeEntityFinalPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
+                packetsToSend.add(new EntitiesDestroyS2CPacket(idsToDestroy));
             }
             entitiesToActuallyDestroy.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
         }
@@ -486,75 +634,123 @@ public class PlayerManager {
         shownFakeEntities.clear();
         shownFakeEntities.addAll(entitiesToActuallyShow);
         this.entitiesToUpdateOnMainThread = new HashMap<>(visibleRealEntities);
-
-        Set<UUID> allInRangeUuids = nearbyEntities.stream().map(Entity::getUuid).collect(Collectors.toSet());
-        hiddenEntities.removeIf(uuid -> !allInRangeUuids.contains(uuid));
-        flickerGuard.keySet().removeIf(uuid -> !allInRangeUuids.contains(uuid));
-
-        cursednessServer.addTask(() -> {
-            if (!player.networkHandler.isConnectionOpen()) return;
-            blockUpdatesToSend.sendTo(player);
-            packetList.forEach(p -> player.networkHandler.sendPacket(p));
-            entitiesToHide.forEach(e -> player.networkHandler.sendPacket(Util.createEntityHidePacket(e.getId())));
-            for (Entity entity : entitiesToShow) {
-                new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {}).sendPackets(player, player.networkHandler::sendPacket);
-            }
-            fakeEntityFinalPackets.forEach(p -> player.networkHandler.sendPacket(p));
-
-            List<Packet<?>> debugPackets = new ArrayList<>();
-            boolean isDebugNow = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
-
-            if (!isDebugNow) {
-                if (!debugEntityIds.isEmpty()) {
-                    int[] idsToDestroy = debugEntityIds.stream().mapToInt(i -> i).toArray();
-                    debugPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
-                    debugEntityIds.clear();
-                    debugEntityUuids.clear();
-                }
-            } else {
-                if (debugEntityIds.size() > currentDebugPoints.size()) {
-                    List<Integer> idsToDestroy = new ArrayList<>();
-                    while (debugEntityIds.size() > currentDebugPoints.size()) {
-                        int id = debugEntityIds.remove(debugEntityIds.size() - 1);
-                        idsToDestroy.add(id);
-                        debugEntityUuids.remove(id);
-                    }
-                    debugPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy.stream().mapToInt(i -> i).toArray()));
-                }
-
-                while (debugEntityIds.size() < currentDebugPoints.size()) {
-                    int fakeId = nextFakeEntityId--;
-                    UUID fakeUuid = UUID.randomUUID();
-                    debugEntityIds.add(fakeId);
-                    debugEntityUuids.put(fakeId, fakeUuid);
-
-                    ChickenEntity tempChicken = new ChickenEntity(EntityType.CHICKEN, player.getWorld());
-                    tempChicken.setGlowing(true);
-
-                    Vec3d pos = currentDebugPoints.get(debugEntityIds.size() - 1);
-
-                    debugPackets.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, pos.x, pos.y, pos.z, 0, 0, EntityType.CHICKEN, 0, Vec3d.ZERO, 0));
-
-                    List<DataTracker.SerializedEntry<?>> trackedValues = tempChicken.getDataTracker().getChangedEntries();
-                    if (trackedValues != null && !trackedValues.isEmpty()) {
-                        debugPackets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
-                    }
-                }
-
-                for (int i = 0; i < debugEntityIds.size(); i++) {
-                    int id = debugEntityIds.get(i);
-                    Vec3d pos = currentDebugPoints.get(i);
-                    PlayerPosition playerPos = new PlayerPosition(pos, Vec3d.ZERO, 0, 0);
-                    debugPackets.add(new EntityPositionS2CPacket(id, playerPos, Collections.emptySet(), true));
-                }
-            }
-            debugPackets.forEach(p -> player.networkHandler.sendPacket(p));
-        });
     }
+
+    private boolean isDebugCleanupNeeded() {
+        return !debugEntityIds.isEmpty() || !raycastDebugEntityIds.isEmpty();
+    }
+
+    private void purgeDebugEntities() {
+        if (!player.networkHandler.isConnectionOpen()) return;
+        purgeDebugEntities(player.networkHandler::sendPacket);
+    }
+
+    private void purgeDebugEntities(List<Packet<?>> packetList) {
+        purgeDebugEntities(packetList::add);
+    }
+
+    private void purgeDebugEntities(java.util.function.Consumer<Packet<?>> packetConsumer) {
+        if (!debugEntityIds.isEmpty()) {
+            packetConsumer.accept(new EntitiesDestroyS2CPacket(debugEntityIds.stream().mapToInt(i -> i).toArray()));
+            debugEntityIds.clear();
+            debugEntityUuids.clear();
+        }
+        if (!raycastDebugEntityIds.isEmpty()) {
+            packetConsumer.accept(new EntitiesDestroyS2CPacket(raycastDebugEntityIds.stream().mapToInt(i -> i).toArray()));
+            raycastDebugEntityIds.clear();
+            raycastDebugEntityUuids.clear();
+        }
+    }
+
+    private void updateDebugEntities(List<Packet<?>> packets, List<Vec3d> cornerPoints, List<Vec3d[]> raycastData) {
+        // Corner Debug Logic
+        if (debugEntityIds.size() > cornerPoints.size()) {
+            List<Integer> idsToDestroy = new ArrayList<>();
+            while (debugEntityIds.size() > cornerPoints.size()) {
+                int id = debugEntityIds.remove(debugEntityIds.size() - 1);
+                idsToDestroy.add(id);
+                debugEntityUuids.remove(id);
+            }
+            packets.add(new EntitiesDestroyS2CPacket(idsToDestroy.stream().mapToInt(i -> i).toArray()));
+        }
+        while (debugEntityIds.size() < cornerPoints.size()) {
+            int fakeId = nextFakeEntityId--;
+            UUID fakeUuid = UUID.randomUUID();
+            debugEntityIds.add(fakeId);
+            debugEntityUuids.put(fakeId, fakeUuid);
+            ChickenEntity tempChicken = new ChickenEntity(EntityType.CHICKEN, player.getWorld());
+            tempChicken.setGlowing(true);
+            Vec3d pos = cornerPoints.get(debugEntityIds.size() - 1);
+            packets.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, pos.x, pos.y, pos.z, 0, 0, EntityType.CHICKEN, 0, Vec3d.ZERO, 0));
+            List<DataTracker.SerializedEntry<?>> trackedValues = tempChicken.getDataTracker().getChangedEntries();
+            if (trackedValues != null && !trackedValues.isEmpty()) {
+                packets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+            }
+        }
+        for (int i = 0; i < debugEntityIds.size(); i++) {
+            int id = debugEntityIds.get(i);
+            Vec3d pos = cornerPoints.get(i);
+            PlayerPosition playerPos = new PlayerPosition(pos, Vec3d.ZERO, 0, 0);
+            packets.add(new EntityPositionS2CPacket(id, playerPos, Collections.emptySet(), true));
+        }
+
+        // Raycast Debug Logic
+        if (raycastDebugEntityIds.size() > raycastData.size()) {
+            List<Integer> idsToDestroy = new ArrayList<>();
+            while (raycastDebugEntityIds.size() > raycastData.size()) {
+                int id = raycastDebugEntityIds.remove(raycastDebugEntityIds.size() - 1);
+                idsToDestroy.add(id);
+                raycastDebugEntityUuids.remove(id);
+            }
+            packets.add(new EntitiesDestroyS2CPacket(idsToDestroy.stream().mapToInt(i -> i).toArray()));
+        }
+        while (raycastDebugEntityIds.size() < raycastData.size()) {
+            int fakeId = nextRaycastDebugEntityId--;
+            UUID fakeUuid = UUID.randomUUID();
+            raycastDebugEntityIds.add(fakeId);
+            raycastDebugEntityUuids.put(fakeId, fakeUuid);
+            Vec3d start = raycastData.get(raycastDebugEntityIds.size() - 1)[0];
+            packets.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, start.x, start.y, start.z, 0, 0, EntityType.BLOCK_DISPLAY, 0, Vec3d.ZERO, 0));
+        }
+        for (int i = 0; i < raycastDebugEntityIds.size(); i++) {
+            int id = raycastDebugEntityIds.get(i);
+            Vec3d[] ray = raycastData.get(i);
+            Vec3d start = ray[0];
+            Vec3d end = ray[1];
+
+            packets.add(new EntityPositionS2CPacket(id, new PlayerPosition(start, Vec3d.ZERO, 0, 0), Collections.emptySet(), true));
+
+            DisplayEntity.BlockDisplayEntity tempDisplay = new DisplayEntity.BlockDisplayEntity(EntityType.BLOCK_DISPLAY, player.getWorld());
+            tempDisplay.setBlockState(Blocks.RED_CONCRETE.getDefaultState());
+
+            Vec3d dir = end.subtract(start);
+            float length = (float) dir.length();
+            if (length > 1e-5f) {
+                dir = dir.normalize();
+            }
+
+            Vector3f translation = new Vector3f(0.0f, 0.0f, 0.0f);
+            Quaternionf leftRotation = new Quaternionf().rotationTo(new Vector3f(0.0f, 0.0f, 1.0f), new Vector3f((float)dir.x, (float)dir.y, (float)dir.z));
+            Vector3f scale = new Vector3f(0.05f, 0.05f, length);
+            Quaternionf rightRotation = new Quaternionf(); // Identity
+            AffineTransformation transform = new AffineTransformation(translation, leftRotation, scale, rightRotation);
+
+            tempDisplay.setTransformation(transform);
+            tempDisplay.setInterpolationDuration(0);
+            tempDisplay.setStartInterpolation(0);
+
+            List<DataTracker.SerializedEntry<?>> trackedValues = tempDisplay.getDataTracker().getChangedEntries();
+            if (trackedValues != null && !trackedValues.isEmpty()) {
+                packets.add(new EntityTrackerUpdateS2CPacket(id, trackedValues));
+            }
+        }
+    }
+
 
     public void onRemoved() {
         cursednessServer.addTask(() -> {
             purgeCache();
+            purgeDebugEntities();
         });
     }
 
@@ -590,14 +786,8 @@ public class PlayerManager {
         lastTickVehicleMap.clear();
         entitiesToUpdateOnMainThread.clear();
         cursednessServer.addTask(() -> {
-            if (!debugEntityIds.isEmpty()) {
-                int[] idsToDestroy = debugEntityIds.stream().mapToInt(i -> i).toArray();
-                player.networkHandler.sendPacket(new EntitiesDestroyS2CPacket(idsToDestroy));
-                debugEntityIds.clear();
-                debugEntityUuids.clear();
-            }
-
             if (!player.networkHandler.isConnectionOpen()) return;
+            purgeDebugEntities(player.networkHandler::sendPacket);
             updatesToSend.sendTo(player);
             for (Entity entity : entitiesToShow) {
                 new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {}).sendPackets(player, player.networkHandler::sendPacket);
