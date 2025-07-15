@@ -100,6 +100,10 @@ public class FlatStandingRectangle {
                 Util.get(pos, rotAxis) < this.right-0.5;
     }
 
+    public Vec3d getCenter() {
+        return createVec3d((this.top + this.bottom) / 2.0, (this.left + this.right) / 2.0);
+    }
+
     public boolean isBeside(Vec3d pos) {
         return  Util.get(pos, axis) < this.other+1 &&
                 Util.get(pos, axis) > this.other;
