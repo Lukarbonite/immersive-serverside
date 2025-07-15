@@ -22,6 +22,22 @@ public class FlatStandingRectangle {
         this.axis = axis;
     }
 
+    public double getTop() {
+        return top;
+    }
+
+    public double getBottom() {
+        return bottom;
+    }
+
+    public double getLeft() {
+        return left;
+    }
+
+    public double getRight() {
+        return right;
+    }
+
     public Direction.Axis getAxis() {
         return axis;
     }

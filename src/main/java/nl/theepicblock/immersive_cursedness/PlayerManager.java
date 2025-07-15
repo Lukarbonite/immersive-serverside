@@ -150,12 +150,31 @@ public class PlayerManager {
         TransformProfile transformProfile = portal.getTransformProfile();
         if (transformProfile == null) return;
 
+        final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
+
+        // Always clear portal blocks in the source dimension first.
+        final FlatStandingRectangle portalBlockClearingRect = new FlatStandingRectangle(
+                portalRect.getTop(), portalRect.getBottom(), portalRect.getLeft(), portalRect.getRight(), portalRect.getOther(), portalRect.getAxis()
+        );
+        BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
+            if (sourceView.getBlock(portalBlockPos).isOf(Blocks.NETHER_PORTAL) && portalBlockClearingRect.contains(portalBlockPos)) {
+                BlockPos immutablePos = portalBlockPos.toImmutable();
+                blocksInView.increment(immutablePos);
+                BlockState newState = Blocks.AIR.getDefaultState();
+                BlockState cachedState = blockCache.get(immutablePos);
+                if (cachedState == null || !cachedState.equals(newState)) {
+                    blockCache.put(immutablePos, newState);
+                    blockUpdatesToSend.put(immutablePos, newState);
+                }
+            }
+        });
+
+        // If the view is occluded, we don't need to render the other side.
         if (isOccludedByOppositeFrame(portal, sourceView, raycastDebugData)) {
             return;
         }
 
         final Vec3d playerEyePos = player.getEyePos();
-        final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
         int playerBlockCoordinate = (int)Math.floor(Util.get(player.getPos(), portalRect.getAxis()));
         int portalBlockCoordinate = (int)Math.round(portalRect.getOther());
         if (playerBlockCoordinate == portalBlockCoordinate) {
@@ -169,19 +188,6 @@ public class PlayerManager {
         final int bottomOfWorld = sourceWorld.getBottomY();
 
         viewRects.add(portalRect);
-
-        BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
-            if (portalRect.contains(portalBlockPos)) {
-                BlockPos immutablePos = portalBlockPos.toImmutable();
-                blocksInView.increment(immutablePos);
-                BlockState newState = Blocks.AIR.getDefaultState();
-                BlockState cachedState = blockCache.get(immutablePos);
-                if (cachedState == null || !cachedState.equals(newState)) {
-                    blockCache.put(immutablePos, newState);
-                    blockUpdatesToSend.put(immutablePos, newState);
-                }
-            }
-        });
 
         for (Entity entity : nearbyEntities) {
             if (viewFrustum.contains(entity.getPos())) {
@@ -221,11 +227,21 @@ public class PlayerManager {
                 BlockState newState;
                 BlockEntity newBlockEntity = null;
 
-                if (distSq > icConfig.squaredAtmosphereRadius) newState = atmosphereBlock;
-                else if (distSq > icConfig.squaredAtmosphereRadiusMinusOne) newState = atmosphereBetweenBlock;
-                else {
-                    newState = transformProfile.transformAndGetFromWorld(pos, destinationView);
-                    newBlockEntity = transformProfile.transformAndGetFromWorldBlockEntity(pos, destinationView);
+                if (distSq > icConfig.squaredAtmosphereRadius) {
+                    newState = atmosphereBlock;
+                } else if (distSq > icConfig.squaredAtmosphereRadiusMinusOne) {
+                    newState = atmosphereBetweenBlock;
+                } else {
+                    BlockPos transformedPos = transformProfile.transform(pos);
+                    BlockState stateFromOtherDimension = destinationView.getBlock(transformedPos);
+
+                    if (stateFromOtherDimension.isOf(Blocks.NETHER_PORTAL)) {
+                        newState = Blocks.AIR.getDefaultState();
+                        newBlockEntity = null;
+                    } else {
+                        newState = transformProfile.rotateState(stateFromOtherDimension);
+                        newBlockEntity = destinationView.getBlockEntity(transformedPos);
+                    }
                 }
 
                 if (pos.getY() == bottomOfWorld + 1) newState = atmosphereBetweenBlock;
