@@ -7,8 +7,11 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.gamerule.v1.GameRuleFactory;
+import net.fabricmc.fabric.api.gamerule.v1.GameRuleRegistry;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.text.Text;
+import net.minecraft.world.GameRules;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -16,10 +19,12 @@ public class ImmersiveCursedness implements ModInitializer {
     public static final Logger LOGGER = LogManager.getLogger("ImmersiveCursedness");
     public static Thread cursednessThread;
     public static CursednessServer cursednessServer;
+    public static GameRules.Key<GameRules.BooleanRule> PORTAL_DEBUG;
 
     @Override
     public void onInitialize() {
         AutoConfig.register(IC_Config.class, JanksonConfigSerializer::new);
+        PORTAL_DEBUG = GameRuleRegistry.register("portalDebug", GameRules.Category.MISC, GameRuleFactory.createBooleanRule(false));
 
         ServerLifecycleEvents.SERVER_STARTED.register(minecraftServer -> {
             cursednessServer = new CursednessServer(minecraftServer);

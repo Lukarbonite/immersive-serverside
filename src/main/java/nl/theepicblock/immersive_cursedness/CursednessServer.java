@@ -82,7 +82,14 @@ public class CursednessServer implements Runnable {
         List<ServerPlayerEntity> playerList = server.getPlayerManager().getPlayerList();
 
         // Remove managers for players who have logged off
-        playerManagers.keySet().removeIf(player -> !playerList.contains(player));
+        playerManagers.entrySet().removeIf(entry -> {
+            ServerPlayerEntity player = entry.getKey();
+            if (!playerList.contains(player)) {
+                entry.getValue().onRemoved();
+                return true;
+            }
+            return false;
+        });
 
         // Add managers for new players
         for (ServerPlayerEntity player : playerList) {

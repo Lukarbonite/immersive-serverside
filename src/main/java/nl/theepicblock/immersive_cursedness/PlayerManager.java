@@ -9,7 +9,9 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.data.DataTracker;
+import net.minecraft.entity.passive.ChickenEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerPosition;
 import net.minecraft.item.ItemStack;
@@ -24,6 +26,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.GameRules;
 import net.minecraft.world.World;
 import nl.theepicblock.immersive_cursedness.mixin.EntitySetHeadYawS2CPacketAccessor;
 import nl.theepicblock.immersive_cursedness.objects.*;
@@ -41,6 +44,10 @@ public class PlayerManager {
     private final BlockCache blockCache = new BlockCache();
     private final Set<UUID> hiddenEntities = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Integer> flickerGuard = new ConcurrentHashMap<>();
+
+    // For debug entities
+    private final List<Integer> debugEntityIds = new ArrayList<>();
+    private final Map<Integer, UUID> debugEntityUuids = new HashMap<>();
 
     // For fake entities
     private final Map<UUID, Integer> realToFakeId = new ConcurrentHashMap<>();
@@ -140,7 +147,8 @@ public class PlayerManager {
         }
 
         final Vec3d playerEyePos = player.getEyePos();
-        final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, portalRect);
+        final FlatStandingRectangle frustumShape = portal.getFrustumShape(playerEyePos);
+        final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, frustumShape);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
         final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
@@ -267,11 +275,23 @@ public class PlayerManager {
         Set<UUID> entitiesInCullingZone = new HashSet<>();
         boolean isNearPortal = false;
 
+        List<Vec3d> currentDebugPoints = new ArrayList<>();
+        boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
+
         for (Portal portal : portalsToProcess) {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
             }
             processPortalRendering(portal, sourceWorld, viewRects, blocksInView, blockUpdatesToSend, packetList, entitiesInCullingZone, nearbyEntities);
+
+            if (debugEnabled) {
+                final Vec3d playerEyePos = player.getEyePos();
+                final FlatStandingRectangle frustumShape = portal.getFrustumShape(playerEyePos);
+                currentDebugPoints.add(frustumShape.getTopLeft());
+                currentDebugPoints.add(frustumShape.getTopRight());
+                currentDebugPoints.add(frustumShape.getBottomLeft());
+                currentDebugPoints.add(frustumShape.getBottomRight());
+            }
         }
 
         blockCache.purge(blocksInView, viewRects, (pos, cachedState) -> {
@@ -315,7 +335,7 @@ public class PlayerManager {
             for (Portal portal : portalsToProcess) {
                 TransformProfile transformProfile = portal.getTransformProfile();
                 if (transformProfile == null) continue;
-                ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal.toFlatStandingRectangle());
+                ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal.getFrustumShape(player.getEyePos()));
                 if (viewFrustum.contains(transformProfile.untransform(realEntity.getPos()))) {
                     visibleRealEntities.put(realEntity.getUuid(), realEntity);
                     entityPortalContext.put(realEntity.getUuid(), portal);
@@ -480,6 +500,61 @@ public class PlayerManager {
                 new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {}).sendPackets(player, player.networkHandler::sendPacket);
             }
             fakeEntityFinalPackets.forEach(p -> player.networkHandler.sendPacket(p));
+
+            List<Packet<?>> debugPackets = new ArrayList<>();
+            boolean isDebugNow = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
+
+            if (!isDebugNow) {
+                if (!debugEntityIds.isEmpty()) {
+                    int[] idsToDestroy = debugEntityIds.stream().mapToInt(i -> i).toArray();
+                    debugPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
+                    debugEntityIds.clear();
+                    debugEntityUuids.clear();
+                }
+            } else {
+                if (debugEntityIds.size() > currentDebugPoints.size()) {
+                    List<Integer> idsToDestroy = new ArrayList<>();
+                    while (debugEntityIds.size() > currentDebugPoints.size()) {
+                        int id = debugEntityIds.remove(debugEntityIds.size() - 1);
+                        idsToDestroy.add(id);
+                        debugEntityUuids.remove(id);
+                    }
+                    debugPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy.stream().mapToInt(i -> i).toArray()));
+                }
+
+                while (debugEntityIds.size() < currentDebugPoints.size()) {
+                    int fakeId = nextFakeEntityId--;
+                    UUID fakeUuid = UUID.randomUUID();
+                    debugEntityIds.add(fakeId);
+                    debugEntityUuids.put(fakeId, fakeUuid);
+
+                    ChickenEntity tempChicken = new ChickenEntity(EntityType.CHICKEN, player.getWorld());
+                    tempChicken.setGlowing(true);
+
+                    Vec3d pos = currentDebugPoints.get(debugEntityIds.size() - 1);
+
+                    debugPackets.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, pos.x, pos.y, pos.z, 0, 0, EntityType.CHICKEN, 0, Vec3d.ZERO, 0));
+
+                    List<DataTracker.SerializedEntry<?>> trackedValues = tempChicken.getDataTracker().getChangedEntries();
+                    if (trackedValues != null && !trackedValues.isEmpty()) {
+                        debugPackets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+                    }
+                }
+
+                for (int i = 0; i < debugEntityIds.size(); i++) {
+                    int id = debugEntityIds.get(i);
+                    Vec3d pos = currentDebugPoints.get(i);
+                    PlayerPosition playerPos = new PlayerPosition(pos, Vec3d.ZERO, 0, 0);
+                    debugPackets.add(new EntityPositionS2CPacket(id, playerPos, Collections.emptySet(), true));
+                }
+            }
+            debugPackets.forEach(p -> player.networkHandler.sendPacket(p));
+        });
+    }
+
+    public void onRemoved() {
+        cursednessServer.addTask(() -> {
+            purgeCache();
         });
     }
 
@@ -515,6 +590,13 @@ public class PlayerManager {
         lastTickVehicleMap.clear();
         entitiesToUpdateOnMainThread.clear();
         cursednessServer.addTask(() -> {
+            if (!debugEntityIds.isEmpty()) {
+                int[] idsToDestroy = debugEntityIds.stream().mapToInt(i -> i).toArray();
+                player.networkHandler.sendPacket(new EntitiesDestroyS2CPacket(idsToDestroy));
+                debugEntityIds.clear();
+                debugEntityUuids.clear();
+            }
+
             if (!player.networkHandler.isConnectionOpen()) return;
             updatesToSend.sendTo(player);
             for (Entity entity : entitiesToShow) {
