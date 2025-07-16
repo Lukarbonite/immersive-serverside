@@ -30,12 +30,39 @@ public class ViewFrustum {
     public ViewFrustum(Vec3d origin, Portal portal) {
         this.origin = origin;
 
-        final FlatStandingRectangle portalRectFront = portal.toFlatStandingRectangle();
+        // 1. Determine the portal's plane axis (the normal to the portal face) and player's position on it.
+        Direction.Axis portalPlaneAxis = Util.rotate(portal.getAxis());
+        double playerPlanePos = Util.get(origin, portalPlaneAxis);
 
-        Direction.Axis portalPlaneAxis = portalRectFront.getAxis();
-        double portalFrontCoordinate = portalRectFront.getOther();
-        double playerDepth = Util.get(origin, portalPlaneAxis);
-        double portalToPlayerSign = Math.signum(playerDepth - portalFrontCoordinate);
+        // 2. Get the portal's min/max coordinates on that plane axis.
+        double portalMinPlanePos = Util.get(portal.getLowerLeft(), portalPlaneAxis);
+        double portalMaxPlanePos = Util.get(portal.getUpperRight(), portalPlaneAxis);
+
+        // 3. Determine the coordinate of the near plane, which should be the face FARTHEST from the player.
+        // A block at `c` occupies the volume from `c` to `c+1`.
+        // The "min" face of the entire portal volume is at `portalMinPlanePos`.
+        // The "max" face of the entire portal volume is at `portalMaxPlanePos + 1.0`.
+        double portalFrontCoordinate;
+        if (Math.abs(playerPlanePos - portalMinPlanePos) > Math.abs(playerPlanePos - (portalMaxPlanePos + 1.0))) {
+            // The player is farther from the min-side face, so we use that one.
+            portalFrontCoordinate = portalMinPlanePos;
+        } else {
+            // The player is farther from the max-side face, so we use that one.
+            portalFrontCoordinate = portalMaxPlanePos + 1.0;
+        }
+
+        // 4. Create the front rectangle definition for the frustum using this dynamic coordinate.
+        final FlatStandingRectangle portalRectFront = new FlatStandingRectangle(
+                portal.getTop() + 1.5,
+                portal.getBottom() - 0.5,
+                portal.getLeft() - 0.5,
+                portal.getRight() + 1.5,
+                portalFrontCoordinate,
+                portalPlaneAxis
+        );
+
+        // The rest of the constructor logic can now proceed with this corrected `portalRectFront`.
+        double portalToPlayerSign = Math.signum(playerPlanePos - portalFrontCoordinate);
 
         if (portalToPlayerSign == 0) { // Player is on the plane, frustum has no volume.
             this.portalOrigin = Vec3d.ZERO;
@@ -124,6 +151,10 @@ public class ViewFrustum {
         this.portalOrigin = tl_f;
         Vector3f unitVector = Direction.get(Direction.AxisDirection.POSITIVE, portalRectFront.getAxis()).getUnitVector();
         this.portalPlaneNormal = new Vec3d(unitVector.x(), unitVector.y(), unitVector.z()).multiply(portalToPlayerSign);
+    }
+
+    public Vec3d getPortalPlaneNormal() {
+        return this.portalPlaneNormal;
     }
 
     public Box getIterationBox(int depth) {

@@ -151,8 +151,6 @@ public class PlayerManager {
         TransformProfile transformProfile = portal.getTransformProfile();
         if (transformProfile == null) return;
 
-        final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
-
         // Always clear portal blocks in the source dimension first.
         BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
             if (sourceView.getBlock(portalBlockPos).isOf(Blocks.NETHER_PORTAL)) {
@@ -168,14 +166,7 @@ public class PlayerManager {
             return;
         }
 
-        final Vec3d playerEyePos = player.getEyePos();
-        int playerBlockCoordinate = (int)Math.floor(Util.get(playerEyePos, portalRect.getAxis()));
-        int portalBlockCoordinate = (int)Math.floor(portalRect.getOther());
-        if (playerBlockCoordinate == portalBlockCoordinate) {
-            return;
-        }
-
-        final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, portal);
+        final ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
         final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
@@ -199,7 +190,7 @@ public class PlayerManager {
 
                     if (!viewFrustum.contains(mutPos)) continue;
 
-                    double distSq = portalRect.getCenter().distanceTo(mutPos.toCenterPos());
+                    double distSq = portal.toFlatStandingRectangle().getCenter().distanceTo(mutPos.toCenterPos());
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) continue;
 
                     BlockPos immutablePos = mutPos.toImmutable();
@@ -263,7 +254,21 @@ public class PlayerManager {
         }
 
         Vec3d direction = closestTangentPoint.subtract(playerEyePos);
-        if (direction.lengthSquared() < 1e-7) return false;
+        if (direction.lengthSquared() < 1e-7) return false; // Player is at the tangent point, not occluded.
+
+        // Stage 1: Angle check.
+        ViewFrustum frustumForNormal = new ViewFrustum(playerEyePos, portal);
+        Vec3d portalPlaneNormal = frustumForNormal.getPortalPlaneNormal();
+
+        // If the dot product is positive or zero, the angle between the view ray and the portal normal is acute or 90 degrees.
+        // This means the player is looking at the side or back of the portal plane, so it should be occluded.
+        // A small negative epsilon is used for floating point safety.
+        if (direction.normalize().dotProduct(portalPlaneNormal) >= -1e-5) {
+            return true;
+        }
+
+        // Stage 2: Raycast check.
+        // If the angle check passed, proceed with raycasting to see if the frame blocks the view.
         direction = direction.normalize();
         Vec3d extendedEndPoint = closestTangentPoint.add(direction.multiply(10.0));
 
