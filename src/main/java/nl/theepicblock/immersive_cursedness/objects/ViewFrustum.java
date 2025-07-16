@@ -5,6 +5,9 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import nl.theepicblock.immersive_cursedness.Util;
+import org.joml.Vector3f;
+
+import java.util.Arrays;
 
 /**
  * Represents the 3D viewing frustum created by looking from an origin point through a rectangular portal.
@@ -21,104 +24,126 @@ public class ViewFrustum {
     private final Vec3d bottomPlaneNormal;
     private final Vec3d leftPlaneNormal;
     private final Vec3d rightPlaneNormal;
-    private final Vec3d[] frustumCorners;
+
+    private final Vec3d[] frustumBaseCorners;
 
     public ViewFrustum(Vec3d origin, Portal portal) {
         this.origin = origin;
 
-        FlatStandingRectangle portalRectFront = portal.toFlatStandingRectangle();
-        Direction.Axis planeAxis = portalRectFront.getAxis();
+        final FlatStandingRectangle portalRectFront = portal.toFlatStandingRectangle();
 
-        // Determine front and back planes
-        double portalFrontPlaneCoord = portalRectFront.getOther();
-        double playerPlaneCoord = Util.get(origin, planeAxis);
+        Direction.Axis portalPlaneAxis = portalRectFront.getAxis();
+        double portalFrontCoordinate = portalRectFront.getOther();
+        double playerDepth = Util.get(origin, portalPlaneAxis);
+        double portalToPlayerSign = Math.signum(playerDepth - portalFrontCoordinate);
 
-        double portalCenterPlaneCoord = portalFrontPlaneCoord + 0.5;
-        double backPlaneCoord;
-        if (playerPlaneCoord > portalCenterPlaneCoord) {
-            backPlaneCoord = portalFrontPlaneCoord;
-        } else {
-            backPlaneCoord = portalFrontPlaneCoord + 1.0;
+        if (portalToPlayerSign == 0) { // Player is on the plane, frustum has no volume.
+            this.portalOrigin = Vec3d.ZERO;
+            this.portalPlaneNormal = Vec3d.ZERO;
+            this.topPlaneNormal = Vec3d.ZERO;
+            this.bottomPlaneNormal = Vec3d.ZERO;
+            this.leftPlaneNormal = Vec3d.ZERO;
+            this.rightPlaneNormal = Vec3d.ZERO;
+            this.frustumBaseCorners = new Vec3d[4];
+            Arrays.fill(this.frustumBaseCorners, origin); // Collapse to a point
+            return;
         }
 
+        double portalBackCoordinate = portalFrontCoordinate - portalToPlayerSign;
+        final FlatStandingRectangle portalRectBack = portalRectFront.expandAbsolute(portalBackCoordinate, origin);
 
-        // Get corners of the portal rectangle (the hole)
-        double bottomY = portal.getBottom();
-        double topY = portal.getTop() + 1.0;
-        double leftContent = portal.getLeft();
-        double rightContent = portal.getRight() + 1.0;
+        // Vertices of the portal's front and back rectangles
+        final Vec3d tl_f = portalRectFront.getTopLeft();
+        final Vec3d tr_f = portalRectFront.getTopRight();
+        final Vec3d bl_f = portalRectFront.getBottomLeft();
+        final Vec3d br_f = portalRectFront.getBottomRight();
 
-        // Calculate the four corners of the back plane
-        Vec3d btl, btr, bbl, bbr;
-        if (planeAxis == Direction.Axis.X) {
-            btl = new Vec3d(backPlaneCoord, topY, leftContent);
-            btr = new Vec3d(backPlaneCoord, topY, rightContent);
-            bbl = new Vec3d(backPlaneCoord, bottomY, leftContent);
-            bbr = new Vec3d(backPlaneCoord, bottomY, rightContent);
-        } else { // planeAxis is Z
-            btl = new Vec3d(leftContent, topY, backPlaneCoord);
-            btr = new Vec3d(rightContent, topY, backPlaneCoord);
-            bbl = new Vec3d(leftContent, bottomY, backPlaneCoord);
-            bbr = new Vec3d(rightContent, bottomY, backPlaneCoord);
+        final Vec3d tl_b = portalRectBack.getTopLeft();
+        final Vec3d tr_b = portalRectBack.getTopRight();
+        final Vec3d bl_b = portalRectBack.getBottomLeft();
+        final Vec3d br_b = portalRectBack.getBottomRight();
+
+        // Calculate the effective corners of the frustum base (a trapezoid on the back plane)
+        Direction.Axis primaryAxis = Util.rotate(portalPlaneAxis);
+        double playerPrimaryCoord = Util.get(origin, primaryAxis);
+        double portalCenterPrimaryCoord = (portalRectFront.getLeft() + portalRectFront.getRight()) / 2.0;
+
+        final Vec3d final_tl, final_tr, final_bl, final_br;
+
+        if (playerPrimaryCoord < portalCenterPrimaryCoord) { // Player is on the "left" side
+            final_tl = tl_f;
+            final_bl = bl_f;
+            final_tr = tr_b;
+            final_br = br_b;
+        } else { // Player is on the "right"
+            final_tr = tr_f;
+            final_br = br_f;
+            final_tl = tl_b;
+            final_bl = bl_b;
+        }
+        this.frustumBaseCorners = new Vec3d[]{final_tl, final_tr, final_bl, final_br};
+
+        // Check for crossover (player looking at the portal from an extreme side angle)
+        Vec3d view_to_final_tl = final_tl.subtract(origin);
+        Vec3d view_to_final_tr = final_tr.subtract(origin);
+        double v_tl_primary = Util.get(view_to_final_tl, primaryAxis);
+        double v_tl_plane = Util.get(view_to_final_tl, portalPlaneAxis);
+        double v_tr_primary = Util.get(view_to_final_tr, primaryAxis);
+        double v_tr_plane = Util.get(view_to_final_tr, portalPlaneAxis);
+        double crossProduct = v_tr_primary * v_tl_plane - v_tr_plane * v_tl_primary;
+
+        if (crossProduct * portalToPlayerSign > 0) { // Crossover detected
+            Vec3d collapsePoint = final_tl.add(final_tr).multiply(0.5);
+            this.portalOrigin = collapsePoint;
+            this.portalPlaneNormal = origin.subtract(collapsePoint).normalize();
+            this.topPlaneNormal = this.bottomPlaneNormal = this.leftPlaneNormal = this.rightPlaneNormal = Vec3d.ZERO;
+            return;
         }
 
-        this.frustumCorners = new Vec3d[]{btl, btr, bbl, bbr};
+        // Define planes using the robustly calculated corners
+        Vec3d otl = final_tl.subtract(origin);
+        Vec3d otr = final_tr.subtract(origin);
+        Vec3d obl = final_bl.subtract(origin);
+        Vec3d obr = final_br.subtract(origin);
 
-        // Vectors from origin to the BACK corners define the side planes
-        Vec3d obtl = btl.subtract(origin);
-        Vec3d obtr = btr.subtract(origin);
-        Vec3d obbl = bbl.subtract(origin);
-        Vec3d obbr = bbr.subtract(origin);
+        Vec3d centerVec = portalRectFront.getCenter().subtract(origin);
 
-        // A point guaranteed to be "inside" the frustum side planes is the center of the portal rect itself.
-        Vec3d frustumCenterVector = portalRectFront.getCenter().subtract(origin);
+        Vec3d tn = otr.crossProduct(otl).normalize();
+        this.topPlaneNormal = centerVec.dotProduct(tn) > 0 ? tn.multiply(-1) : tn;
 
-        Vec3d tn = obtr.crossProduct(obtl).normalize();
-        if (frustumCenterVector.dotProduct(tn) > 0) tn = tn.multiply(-1);
-        this.topPlaneNormal = tn;
+        Vec3d bn = obl.crossProduct(obr).normalize();
+        this.bottomPlaneNormal = centerVec.dotProduct(bn) > 0 ? bn.multiply(-1) : bn;
 
-        Vec3d bn = obbl.crossProduct(obbr).normalize();
-        if (frustumCenterVector.dotProduct(bn) > 0) bn = bn.multiply(-1);
-        this.bottomPlaneNormal = bn;
+        Vec3d ln = otl.crossProduct(obl).normalize();
+        this.leftPlaneNormal = centerVec.dotProduct(ln) > 0 ? ln.multiply(-1) : ln;
 
-        Vec3d ln = obtl.crossProduct(obbl).normalize();
-        if (frustumCenterVector.dotProduct(ln) > 0) ln = ln.multiply(-1);
-        this.leftPlaneNormal = ln;
+        Vec3d rn = obr.crossProduct(otr).normalize();
+        this.rightPlaneNormal = centerVec.dotProduct(rn) > 0 ? rn.multiply(-1) : rn;
 
-        Vec3d rn = obbr.crossProduct(obtr).normalize();
-        if (frustumCenterVector.dotProduct(rn) > 0) rn = rn.multiply(-1);
-        this.rightPlaneNormal = rn;
-
-        // Define the near-clipping plane using the FRONT face of the portal
-        this.portalOrigin = portalRectFront.getTopLeft();
-        Vec3d v1 = portalRectFront.getTopRight().subtract(portalOrigin);
-        Vec3d v2 = portalRectFront.getBottomLeft().subtract(portalOrigin);
-        Vec3d normal = v2.crossProduct(v1).normalize();
-        if (origin.subtract(portalOrigin).dotProduct(normal) < 0) {
-            normal = normal.multiply(-1);
-        }
-        this.portalPlaneNormal = normal;
-    }
-
-    public Vec3d getPortalPlaneNormal() {
-        return portalPlaneNormal;
+        // Near clipping plane is the portal's front face
+        this.portalOrigin = tl_f;
+        Vector3f unitVector = Direction.get(Direction.AxisDirection.POSITIVE, portalRectFront.getAxis()).getUnitVector();
+        this.portalPlaneNormal = new Vec3d(unitVector.x(), unitVector.y(), unitVector.z()).multiply(portalToPlayerSign);
     }
 
     public Box getIterationBox(int depth) {
-        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
-        double maxX = Double.MIN_VALUE, maxY = Double.MIN_VALUE, maxZ = Double.MIN_VALUE;
+        // Start with the player's eye position
+        double minX = origin.x, minY = origin.y, minZ = origin.z;
+        double maxX = origin.x, maxY = origin.y, maxZ = origin.z;
 
-        // The 8 vertices of the frustum volume (4 near, 4 far)
-        Vec3d[] vertices = new Vec3d[8];
-        for (int i = 0; i < 4; i++) {
-            Vec3d nearCorner = this.frustumCorners[i];
-            Vec3d dir = nearCorner.subtract(this.origin).normalize();
-            Vec3d farCorner = nearCorner.add(dir.multiply(depth));
-            vertices[i] = nearCorner;
-            vertices[i+4] = farCorner;
+        // Get the four corners of the projected base on the far plane
+        Vec3d[] farCorners = new Vec3d[4];
+        for (int i=0; i<4; i++) {
+            Vec3d dir = frustumBaseCorners[i].subtract(origin);
+            if (dir.lengthSquared() > 1e-7) {
+                farCorners[i] = origin.add(dir.normalize().multiply(depth));
+            } else {
+                farCorners[i] = frustumBaseCorners[i]; // If a corner is at the eye, use that
+            }
         }
 
-        for (Vec3d v : vertices) {
+        // Expand the box to include the far corners
+        for (Vec3d v : farCorners) {
             minX = Math.min(minX, v.x);
             minY = Math.min(minY, v.y);
             minZ = Math.min(minZ, v.z);
@@ -163,6 +188,8 @@ public class ViewFrustum {
      * @return true if the position is inside the frustum, false otherwise.
      */
     public boolean contains(Vec3d pos) {
+        if (leftPlaneNormal == Vec3d.ZERO) return false; // Frustum is collapsed
+
         if (!containsInSidePlanes(pos)) {
             return false;
         }
