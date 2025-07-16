@@ -53,8 +53,6 @@ public class PlayerManager {
     private final Map<UUID, Integer> flickerGuard = new ConcurrentHashMap<>();
 
     // For debug entities
-    private final List<Integer> debugEntityIds = new ArrayList<>();
-    private final Map<Integer, UUID> debugEntityUuids = new HashMap<>();
     private final List<Integer> raycastDebugEntityIds = new ArrayList<>();
     private final Map<Integer, UUID> raycastDebugEntityUuids = new HashMap<>();
     private final List<Integer> cornerRaycastDebugEntityIds = new ArrayList<>();
@@ -180,7 +178,7 @@ public class PlayerManager {
             return;
         }
 
-        final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, portal.getFrustumShape(playerEyePos));
+        final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, portal);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
         final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
@@ -194,80 +192,58 @@ public class PlayerManager {
             }
         }
 
-        double playerCoordinateOnAxis = Util.get(playerEyePos, portalRect.getAxis());
-        double portalCoordinateOnAxis = portalRect.getOther();
+        // This is now more efficient and accurate
+        Box iterationBox = viewFrustum.getIterationBox(icConfig.portalDepth);
+        BlockPos.Mutable mutPos = new BlockPos.Mutable();
 
-        for (int i = 1; i < icConfig.portalDepth; i++) {
-            FlatStandingRectangle positiveSideLayer = portalRect.expandAbsolute(portalCoordinateOnAxis + i, playerEyePos);
-            FlatStandingRectangle negativeSideLayer = portalRect.expandAbsolute(portalCoordinateOnAxis - i, playerEyePos);
-            viewRects.add(positiveSideLayer);
-            viewRects.add(negativeSideLayer);
+        for (int y = (int)iterationBox.minY; y < iterationBox.maxY; y++) {
+            mutPos.setY(y);
+            for (int x = (int)iterationBox.minX; x < iterationBox.maxX; x++) {
+                mutPos.setX(x);
+                for (int z = (int)iterationBox.minZ; z < iterationBox.maxZ; z++) {
+                    mutPos.setZ(z);
 
-            FlatStandingRectangle renderLayer;
-            FlatStandingRectangle cullLayer;
+                    if (!viewFrustum.contains(mutPos)) continue;
 
-            if (playerCoordinateOnAxis > portalCoordinateOnAxis) {
-                renderLayer = negativeSideLayer;
-                cullLayer = positiveSideLayer;
-            } else {
-                renderLayer = positiveSideLayer;
-                cullLayer = negativeSideLayer;
-            }
+                    double distSq = portal.getDistance(mutPos);
+                    if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) continue;
 
-            renderLayer.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, Util.calculateMinMax(sourceWorld, destinationView.getWorld(), transformProfile), (pos) -> {
-                if (!viewFrustum.contains(pos)) return;
-
-                double distSq = portal.getDistance(pos);
-                if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) return;
-
-                BlockPos immutablePos = pos.toImmutable();
-                blocksInView.increment(immutablePos);
-
-                BlockState newState;
-                BlockEntity newBlockEntity = null;
-
-                if (distSq > icConfig.squaredAtmosphereRadius) {
-                    newState = atmosphereBlock;
-                } else if (distSq > icConfig.squaredAtmosphereRadiusMinusOne) {
-                    newState = atmosphereBetweenBlock;
-                } else {
-                    BlockPos transformedPos = transformProfile.transform(pos);
-                    BlockState stateFromOtherDimension = destinationView.getBlock(transformedPos);
-
-                    if (stateFromOtherDimension.isOf(Blocks.NETHER_PORTAL)) {
-                        newState = Blocks.AIR.getDefaultState();
-                        newBlockEntity = null;
-                    } else {
-                        newState = transformProfile.rotateState(stateFromOtherDimension);
-                        newBlockEntity = destinationView.getBlockEntity(transformedPos);
-                    }
-                }
-
-                if (pos.getY() == bottomOfWorld + 1) newState = atmosphereBetweenBlock;
-                if (pos.getY() == bottomOfWorld) newState = atmosphereBlock;
-
-                BlockState cachedState = blockCache.get(immutablePos);
-                if (cachedState == null || !cachedState.equals(newState)) {
-                    blockCache.put(immutablePos, newState);
-                    blockUpdatesToSend.put(immutablePos, newState);
-                    if (newBlockEntity != null) {
-                        packetList.add(Util.createFakeBlockEntityPacket(newBlockEntity, immutablePos, sourceWorld));
-                    }
-                }
-            });
-
-            cullLayer.iterateClamped(player.getPos(), icConfig.horizontalSendLimit, new Util.WorldHeights(sourceView.getBottomY(), sourceView.getTopYInclusive()), (pos) -> {
-                if (viewFrustum.containsInSidePlanes(pos.toCenterPos())) {
-                    BlockPos immutablePos = pos.toImmutable();
+                    BlockPos immutablePos = mutPos.toImmutable();
                     blocksInView.increment(immutablePos);
-                    BlockState newState = Blocks.AIR.getDefaultState();
+
+                    BlockState newState;
+                    BlockEntity newBlockEntity = null;
+
+                    if (distSq > icConfig.squaredAtmosphereRadius) {
+                        newState = atmosphereBlock;
+                    } else if (distSq > icConfig.squaredAtmosphereRadiusMinusOne) {
+                        newState = atmosphereBetweenBlock;
+                    } else {
+                        BlockPos transformedPos = transformProfile.transform(immutablePos);
+                        BlockState stateFromOtherDimension = destinationView.getBlock(transformedPos);
+
+                        if (stateFromOtherDimension.isOf(Blocks.NETHER_PORTAL)) {
+                            newState = Blocks.AIR.getDefaultState();
+                            newBlockEntity = null;
+                        } else {
+                            newState = transformProfile.rotateState(stateFromOtherDimension);
+                            newBlockEntity = destinationView.getBlockEntity(transformedPos);
+                        }
+                    }
+
+                    if (y == bottomOfWorld + 1) newState = atmosphereBetweenBlock;
+                    if (y == bottomOfWorld) newState = atmosphereBlock;
+
                     BlockState cachedState = blockCache.get(immutablePos);
                     if (cachedState == null || !cachedState.equals(newState)) {
                         blockCache.put(immutablePos, newState);
                         blockUpdatesToSend.put(immutablePos, newState);
+                        if (newBlockEntity != null) {
+                            packetList.add(Util.createFakeBlockEntityPacket(newBlockEntity, immutablePos, sourceWorld));
+                        }
                     }
                 }
-            });
+            }
         }
     }
 
@@ -441,7 +417,6 @@ public class PlayerManager {
         final Set<UUID> entitiesInCullingZone = new HashSet<>();
         boolean isNearPortal = false;
 
-        final List<Vec3d> currentDebugPoints = new ArrayList<>();
         final List<Vec3d[]> currentRaycastDebugData = new ArrayList<>();
         final List<Vec3d[]> cornerRaycastDebugData = new ArrayList<>();
         final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
@@ -454,12 +429,6 @@ public class PlayerManager {
 
             if (debugEnabled) {
                 final Vec3d playerEyePos = player.getEyePos();
-                final FlatStandingRectangle frustumShape = portal.getFrustumShape(playerEyePos);
-                currentDebugPoints.add(frustumShape.getTopLeft());
-                currentDebugPoints.add(frustumShape.getTopRight());
-                currentDebugPoints.add(frustumShape.getBottomLeft());
-                currentDebugPoints.add(frustumShape.getBottomRight());
-
                 Direction.Axis planeAxis = portal.toFlatStandingRectangle().getAxis();
 
                 double portalFrontPlaneCoord = portal.toFlatStandingRectangle().getOther();
@@ -555,7 +524,7 @@ public class PlayerManager {
         processFakeEntities(packetsToSend, destinationEntityMap, portalsToProcess);
 
         if (debugEnabled) {
-            updateDebugEntities(packetsToSend, currentDebugPoints, currentRaycastDebugData, cornerRaycastDebugData);
+            updateDebugEntities(packetsToSend, currentRaycastDebugData, cornerRaycastDebugData);
         } else if (isDebugCleanupNeeded()) {
             purgeDebugEntities(packetsToSend);
         }
@@ -574,7 +543,7 @@ public class PlayerManager {
             for (Portal portal : portalsToProcess) {
                 TransformProfile transformProfile = portal.getTransformProfile();
                 if (transformProfile == null) continue;
-                ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal.getFrustumShape(player.getEyePos()));
+                ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal);
                 if (viewFrustum.contains(transformProfile.untransform(realEntity.getPos()))) {
                     visibleRealEntities.put(realEntity.getUuid(), realEntity);
                     entityPortalContext.put(realEntity.getUuid(), portal);
@@ -727,7 +696,7 @@ public class PlayerManager {
     }
 
     private boolean isDebugCleanupNeeded() {
-        return !debugEntityIds.isEmpty() || !raycastDebugEntityIds.isEmpty() || !cornerRaycastDebugEntityIds.isEmpty();
+        return !raycastDebugEntityIds.isEmpty() || !cornerRaycastDebugEntityIds.isEmpty();
     }
 
     private void purgeDebugEntities() {
@@ -740,11 +709,6 @@ public class PlayerManager {
     }
 
     private void purgeDebugEntities(java.util.function.Consumer<Packet<?>> packetConsumer) {
-        if (!debugEntityIds.isEmpty()) {
-            packetConsumer.accept(new EntitiesDestroyS2CPacket(debugEntityIds.stream().mapToInt(i -> i).toArray()));
-            debugEntityIds.clear();
-            debugEntityUuids.clear();
-        }
         if (!raycastDebugEntityIds.isEmpty()) {
             packetConsumer.accept(new EntitiesDestroyS2CPacket(raycastDebugEntityIds.stream().mapToInt(i -> i).toArray()));
             raycastDebugEntityIds.clear();
@@ -757,38 +721,7 @@ public class PlayerManager {
         }
     }
 
-    private void updateDebugEntities(List<Packet<?>> packets, List<Vec3d> cornerPoints, List<Vec3d[]> raycastData, List<Vec3d[]> cornerRaycastData) {
-        // Corner Debug Logic
-        if (debugEntityIds.size() > cornerPoints.size()) {
-            List<Integer> idsToDestroy = new ArrayList<>();
-            while (debugEntityIds.size() > cornerPoints.size()) {
-                int id = debugEntityIds.remove(debugEntityIds.size() - 1);
-                idsToDestroy.add(id);
-                debugEntityUuids.remove(id);
-            }
-            packets.add(new EntitiesDestroyS2CPacket(idsToDestroy.stream().mapToInt(i -> i).toArray()));
-        }
-        while (debugEntityIds.size() < cornerPoints.size()) {
-            int fakeId = nextFakeEntityId--;
-            UUID fakeUuid = UUID.randomUUID();
-            debugEntityIds.add(fakeId);
-            debugEntityUuids.put(fakeId, fakeUuid);
-            ChickenEntity tempChicken = new ChickenEntity(EntityType.CHICKEN, player.getWorld());
-            tempChicken.setGlowing(true);
-            Vec3d pos = cornerPoints.get(debugEntityIds.size() - 1);
-            packets.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, pos.x, pos.y, pos.z, 0, 0, EntityType.CHICKEN, 0, Vec3d.ZERO, 0));
-            List<DataTracker.SerializedEntry<?>> trackedValues = tempChicken.getDataTracker().getChangedEntries();
-            if (trackedValues != null && !trackedValues.isEmpty()) {
-                packets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
-            }
-        }
-        for (int i = 0; i < debugEntityIds.size(); i++) {
-            int id = debugEntityIds.get(i);
-            Vec3d pos = cornerPoints.get(i);
-            PlayerPosition playerPos = new PlayerPosition(pos, Vec3d.ZERO, 0, 0);
-            packets.add(new EntityPositionS2CPacket(id, playerPos, Collections.emptySet(), true));
-        }
-
+    private void updateDebugEntities(List<Packet<?>> packets, List<Vec3d[]> raycastData, List<Vec3d[]> cornerRaycastData) {
         // Raycast Debug Logic
         if (raycastDebugEntityIds.size() > raycastData.size()) {
             List<Integer> idsToDestroy = new ArrayList<>();
