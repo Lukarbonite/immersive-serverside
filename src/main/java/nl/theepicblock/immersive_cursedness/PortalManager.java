@@ -6,6 +6,7 @@ import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ChunkTicketType;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.*;
+import net.minecraft.util.shape.VoxelShapes;
 import net.minecraft.world.TeleportTarget;
 import net.minecraft.world.poi.PointOfInterest;
 import net.minecraft.world.poi.PointOfInterestStorage;
@@ -137,7 +138,9 @@ public class PortalManager {
     }
 
     private boolean isValidFrameBlock(AsyncWorldView world, BlockPos pos) {
-        return world.getBlock(pos).isFullCube(world, pos);
+        BlockState state = world.getBlock(pos);
+        // isFullCube is deprecated. A more reliable check is for a solid block with a full cube collision shape.
+        return state.isSolid() && state.getCollisionShape(world, pos).equals(VoxelShapes.fullCube());
     }
 
     private TransformProfile createTransformProfile(BlockPos pos, ServerWorld destination) {
