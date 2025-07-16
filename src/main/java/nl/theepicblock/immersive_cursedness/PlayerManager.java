@@ -161,15 +161,11 @@ public class PlayerManager {
                 BlockPos immutablePos = portalBlockPos.toImmutable();
                 blocksInView.increment(immutablePos);
                 BlockState newState = Blocks.AIR.getDefaultState();
-                BlockState cachedState = blockCache.get(immutablePos);
-                if (cachedState == null || !cachedState.equals(newState)) {
-                    blockCache.put(immutablePos, newState);
-                    blockUpdatesToSend.put(immutablePos, newState);
-                }
+                blockCache.put(immutablePos, newState);
+                blockUpdatesToSend.put(immutablePos, newState);
             }
         });
 
-        // If the view is occluded, we don't need to render the other side.
         if (isOccludedByOppositeFrame(portal, sourceView, raycastDebugData)) {
             return;
         }
@@ -463,6 +459,12 @@ public class PlayerManager {
         }
 
         blockCache.purge(blocksInView, viewRects, (pos, cachedState) -> {
+            // If the block we are about to revert is a portal block, and we are still near
+            // any portals, do not send the reversion packet. This prevents the 1-frame flicker.
+            if (sourceView.getBlock(pos).isOf(Blocks.NETHER_PORTAL) && !portalsToProcess.isEmpty()) {
+                return;
+            }
+
             BlockState originalState = sourceView.getBlock(pos);
             if (!originalState.equals(cachedState)) {
                 blockUpdatesToSend.put(pos, originalState);
@@ -472,6 +474,7 @@ public class PlayerManager {
                 }
             }
         });
+
 
         ((PlayerInterface) player).immersivecursedness$setCloseToPortal(isNearPortal);
 
