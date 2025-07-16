@@ -147,20 +147,17 @@ public class PlayerManager {
         }
     }
 
-    private void processPortalRendering(Portal portal, ServerWorld sourceWorld, List<FlatStandingRectangle> viewRects, Chunk2IntMap blocksInView, BlockUpdateMap blockUpdatesToSend, List<Packet<?>> packetList, Set<UUID> entitiesInCullingZone, List<Entity> nearbyEntities, List<Vec3d[]> raycastDebugData) {
+    private void processPortalRendering(Portal portal, ServerWorld sourceWorld, Set<BlockPos> blocksInView, BlockUpdateMap blockUpdatesToSend, List<Packet<?>> packetList, Set<UUID> entitiesInCullingZone, List<Entity> nearbyEntities, List<Vec3d[]> raycastDebugData) {
         TransformProfile transformProfile = portal.getTransformProfile();
         if (transformProfile == null) return;
 
         final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
 
         // Always clear portal blocks in the source dimension first.
-        final FlatStandingRectangle portalBlockClearingRect = new FlatStandingRectangle(
-                portalRect.getTop(), portalRect.getBottom(), portalRect.getLeft(), portalRect.getRight(), portalRect.getOther(), portalRect.getAxis()
-        );
         BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
-            if (sourceView.getBlock(portalBlockPos).isOf(Blocks.NETHER_PORTAL) && portalBlockClearingRect.contains(portalBlockPos)) {
+            if (sourceView.getBlock(portalBlockPos).isOf(Blocks.NETHER_PORTAL)) {
                 BlockPos immutablePos = portalBlockPos.toImmutable();
-                blocksInView.increment(immutablePos);
+                blocksInView.add(immutablePos);
                 BlockState newState = Blocks.AIR.getDefaultState();
                 blockCache.put(immutablePos, newState);
                 blockUpdatesToSend.put(immutablePos, newState);
@@ -172,19 +169,11 @@ public class PlayerManager {
         }
 
         final Vec3d playerEyePos = player.getEyePos();
-        int playerBlockCoordinate = (int)Math.floor(Util.get(player.getPos(), portalRect.getAxis()));
-        int portalBlockCoordinate = (int)Math.round(portalRect.getOther());
-        if (playerBlockCoordinate == portalBlockCoordinate) {
-            return;
-        }
-
         final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, portal);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
         final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
         final int bottomOfWorld = sourceWorld.getBottomY();
-
-        viewRects.add(portalRect);
 
         for (Entity entity : nearbyEntities) {
             if (viewFrustum.contains(entity.getPos())) {
@@ -192,7 +181,6 @@ public class PlayerManager {
             }
         }
 
-        // This is now more efficient and accurate
         Box iterationBox = viewFrustum.getIterationBox(icConfig.portalDepth);
         BlockPos.Mutable mutPos = new BlockPos.Mutable();
 
@@ -205,11 +193,11 @@ public class PlayerManager {
 
                     if (!viewFrustum.contains(mutPos)) continue;
 
-                    double distSq = portal.getDistance(mutPos);
+                    double distSq = portalRect.getCenter().distanceTo(mutPos.toCenterPos());
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) continue;
 
                     BlockPos immutablePos = mutPos.toImmutable();
-                    blocksInView.increment(immutablePos);
+                    blocksInView.add(immutablePos);
 
                     BlockState newState;
                     BlockEntity newBlockEntity = null;
@@ -412,8 +400,7 @@ public class PlayerManager {
 
         final List<Packet<?>> packetsToSend = new ArrayList<>();
         final BlockUpdateMap blockUpdatesToSend = new BlockUpdateMap();
-        final List<FlatStandingRectangle> viewRects = new ArrayList<>();
-        final Chunk2IntMap blocksInView = new Chunk2IntMap();
+        final Set<BlockPos> blocksInViewPositions = new HashSet<>();
         final Set<UUID> entitiesInCullingZone = new HashSet<>();
         boolean isNearPortal = false;
 
@@ -425,7 +412,7 @@ public class PlayerManager {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
             }
-            processPortalRendering(portal, sourceWorld, viewRects, blocksInView, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities, currentRaycastDebugData);
+            processPortalRendering(portal, sourceWorld, blocksInViewPositions, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities, currentRaycastDebugData);
 
             if (debugEnabled) {
                 final Vec3d playerEyePos = player.getEyePos();
@@ -475,7 +462,7 @@ public class PlayerManager {
             }
         }
 
-        blockCache.purge(blocksInView, viewRects, (pos, cachedState) -> {
+        blockCache.purge(blocksInViewPositions, (pos, cachedState) -> {
             // If the block we are about to revert is a portal block, and we are still near
             // any portals, do not send the reversion packet. This prevents the 1-frame flicker.
             if (sourceView.getBlock(pos).isOf(Blocks.NETHER_PORTAL) && !portalsToProcess.isEmpty()) {
