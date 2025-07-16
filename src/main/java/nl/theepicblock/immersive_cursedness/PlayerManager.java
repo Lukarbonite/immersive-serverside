@@ -169,6 +169,12 @@ public class PlayerManager {
         }
 
         final Vec3d playerEyePos = player.getEyePos();
+        int playerBlockCoordinate = (int)Math.floor(Util.get(playerEyePos, portalRect.getAxis()));
+        int portalBlockCoordinate = (int)Math.floor(portalRect.getOther());
+        if (playerBlockCoordinate == portalBlockCoordinate) {
+            return;
+        }
+
         final ViewFrustum viewFrustum = new ViewFrustum(playerEyePos, portal);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
