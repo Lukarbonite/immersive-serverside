@@ -426,50 +426,26 @@ public class PlayerManager {
             processPortalRendering(portal, sourceWorld, blocksInViewPositions, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities, currentRaycastDebugData);
 
             if (debugEnabled) {
-                final Vec3d playerEyePos = player.getEyePos();
-                Direction.Axis planeAxis = portal.toFlatStandingRectangle().getAxis();
-
-                double portalFrontPlaneCoord = portal.toFlatStandingRectangle().getOther();
-                double playerPlaneCoord = Util.get(playerEyePos, planeAxis);
-
-                double portalCenterPlaneCoord = portalFrontPlaneCoord + 0.5;
-                double backPlaneCoord;
-                if (playerPlaneCoord > portalCenterPlaneCoord) {
-                    backPlaneCoord = portalFrontPlaneCoord;
-                } else {
-                    backPlaneCoord = portalFrontPlaneCoord + 1.0;
-                }
-
-                double bottomY = portal.getBottom();
-                double topY = portal.getTop() + 1.0;
-                double leftContent = portal.getLeft();
-                double rightContent = portal.getRight() + 1.0;
-
-                Vec3d bbl, bbr, btl, btr;
-
-                if (planeAxis == Direction.Axis.X) {
-                    btl = new Vec3d(backPlaneCoord, topY, leftContent);
-                    btr = new Vec3d(backPlaneCoord, topY, rightContent);
-                    bbl = new Vec3d(backPlaneCoord, bottomY, leftContent);
-                    bbr = new Vec3d(backPlaneCoord, bottomY, rightContent);
-                } else { // planeAxis is Z
-                    btl = new Vec3d(leftContent, topY, backPlaneCoord);
-                    btr = new Vec3d(rightContent, topY, backPlaneCoord);
-                    bbl = new Vec3d(leftContent, bottomY, backPlaneCoord);
-                    bbr = new Vec3d(rightContent, bottomY, backPlaneCoord);
-                }
+                final ViewFrustum debugFrustum = new ViewFrustum(player.getEyePos(), portal);
+                final Vec3d[] corners = debugFrustum.getFrustumBaseCorners();
+                // corners are tl, tr, bl, br
+                final Vec3d btl = corners[0];
+                final Vec3d btr = corners[1];
+                final Vec3d bbl = corners[2];
+                final Vec3d bbr = corners[3];
 
                 final double extensionLength = icConfig.portalDepth;
                 java.util.function.Function<Vec3d, Vec3d> extendRay = (corner) -> {
-                    Vec3d direction = corner.subtract(playerEyePos);
+                    Vec3d direction = corner.subtract(player.getEyePos());
                     if (direction.lengthSquared() < 1e-7) return corner;
-                    return corner.add(direction.normalize().multiply(extensionLength));
+                    // Project onto far plane
+                    return player.getEyePos().add(direction.normalize().multiply(extensionLength));
                 };
 
-                cornerRaycastDebugData.add(new Vec3d[]{playerEyePos, extendRay.apply(bbl)});
-                cornerRaycastDebugData.add(new Vec3d[]{playerEyePos, extendRay.apply(bbr)});
-                cornerRaycastDebugData.add(new Vec3d[]{playerEyePos, extendRay.apply(btl)});
-                cornerRaycastDebugData.add(new Vec3d[]{playerEyePos, extendRay.apply(btr)});
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(bbl)});
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(bbr)});
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(btl)});
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(btr)});
             }
         }
 
