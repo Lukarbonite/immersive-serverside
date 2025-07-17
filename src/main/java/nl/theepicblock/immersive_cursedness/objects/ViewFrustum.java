@@ -45,10 +45,10 @@ public class ViewFrustum {
         double portalFrontCoordinate;
         if (Math.abs(playerPlanePos - portalMinPlanePos) > Math.abs(playerPlanePos - (portalMaxPlanePos + 1.0))) {
             // The player is farther from the min-side face, so we use that one.
-            portalFrontCoordinate = portalMinPlanePos;
+            portalFrontCoordinate = portalMinPlanePos - 1.0;
         } else {
             // The player is farther from the max-side face, so we use that one.
-            portalFrontCoordinate = portalMaxPlanePos + 1.0;
+            portalFrontCoordinate = portalMaxPlanePos + 2.0;
         }
 
         // 4. Create the front rectangle definition for the frustum using this dynamic coordinate.
