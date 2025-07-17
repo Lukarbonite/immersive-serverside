@@ -190,6 +190,10 @@ public class PlayerManager {
 
                     if (!viewFrustum.contains(mutPos)) continue;
 
+                    if (isFrameBlock(mutPos, portal, sourceView)) {
+                        continue;
+                    }
+
                     double distSq = portal.toFlatStandingRectangle().getCenter().distanceTo(mutPos.toCenterPos());
                     if (distSq > icConfig.squaredAtmosphereRadiusPlusOne) continue;
 
@@ -205,14 +209,29 @@ public class PlayerManager {
                         newState = atmosphereBetweenBlock;
                     } else {
                         BlockPos transformedPos = transformProfile.transform(immutablePos);
-                        BlockState stateFromOtherDimension = destinationView.getBlock(transformedPos);
 
-                        if (stateFromOtherDimension.isOf(Blocks.NETHER_PORTAL)) {
+                        boolean occlude = false;
+                        if (!portal.hasCorners()) {
+                            Direction.Axis destContentAxis = transformProfile.getTargetAxis(portal.getAxis());
+                            Direction.Axis destPlaneAxis = Util.rotate(destContentAxis);
+                            int destPlaneCoord = Util.get(transformProfile.getTargetPos(), destPlaneAxis);
+                            if (Util.get(transformedPos, destPlaneAxis) == destPlaneCoord) {
+                                occlude = true;
+                            }
+                        }
+
+                        if (occlude) {
                             newState = Blocks.AIR.getDefaultState();
                             newBlockEntity = null;
                         } else {
-                            newState = transformProfile.rotateState(stateFromOtherDimension);
-                            newBlockEntity = destinationView.getBlockEntity(transformedPos);
+                            BlockState stateFromOtherDimension = destinationView.getBlock(transformedPos);
+                            if (stateFromOtherDimension.isOf(Blocks.NETHER_PORTAL)) {
+                                newState = Blocks.AIR.getDefaultState();
+                                newBlockEntity = null;
+                            } else {
+                                newState = transformProfile.rotateState(stateFromOtherDimension);
+                                newBlockEntity = destinationView.getBlockEntity(transformedPos);
+                            }
                         }
                     }
 

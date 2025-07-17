@@ -21,6 +21,10 @@ public class Portal {
         this.transformProfile = transformProfile;
     }
 
+    public boolean hasCorners() {
+        return this.hasCorners;
+    }
+
     public double getDistance(BlockPos pos) {
         return upperRight.getSquaredDistance(pos);
     }
