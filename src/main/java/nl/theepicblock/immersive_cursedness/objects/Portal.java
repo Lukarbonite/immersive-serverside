@@ -21,6 +21,10 @@ public class Portal {
         this.transformProfile = transformProfile;
     }
 
+    public boolean hasCorners() {
+        return this.hasCorners;
+    }
+
     public double getDistance(BlockPos pos) {
         return upperRight.getSquaredDistance(pos);
     }
@@ -93,25 +97,14 @@ public class Portal {
     }
 
     public FlatStandingRectangle toFlatStandingRectangle() {
-        if (this.hasCorners) {
-            return new FlatStandingRectangle(
-                    this.getTop()+1.5,
-                    this.getBottom()-0.5,
-                    this.getLeft()-0.5,
-                    this.getRight()+1.5,
-                    Util.get(this.getUpperRight(),Util.rotate(axis)),
-                    Util.rotate(axis)
-            );
-        } else {
-            return new RectangleWithCutoutCorners(
-                    this.getTop()+1.5,
-                    this.getBottom()-0.5,
-                    this.getLeft()-0.5,
-                    this.getRight()+1.5,
-                    Util.get(this.getUpperRight(),Util.rotate(axis)),
-                    Util.rotate(axis)
-            );
-        }
+        return new FlatStandingRectangle(
+                this.getTop() + 1.5,
+                this.getBottom() - 0.5,
+                this.getLeft() - 0.5,
+                this.getRight() + 1.5,
+                Util.get(this.getUpperRight(), Util.rotate(axis)),
+                Util.rotate(axis)
+        );
     }
 
     public FlatStandingRectangle getFrustumShape(Vec3d playerEyePos) {
@@ -187,9 +180,9 @@ public class Portal {
             };
         }
 
-        return new RectangleWithCutoutCorners(
+        return new FlatStandingRectangle(
                 portalRectFront.top, portalRectFront.bottom, portalRectFront.left, portalRectFront.right,
-                portalRectFront.other, portalRectFront.axis, 0.0, 0.0
+                portalRectFront.other, portalRectFront.axis
         ) {
             @Override public Vec3d getTopLeft() { return final_tl; }
             @Override public Vec3d getTopRight() { return final_tr; }

@@ -31,6 +31,13 @@ public class TransformProfile {
         this.rotation = rotation;
     }
 
+    public Direction.Axis getTargetAxis(Direction.Axis sourceAxis) {
+        if (this.rotation == 90 || this.rotation == -90) {
+            return sourceAxis == Direction.Axis.X ? Direction.Axis.Z : Direction.Axis.X;
+        }
+        return sourceAxis;
+    }
+
     // START: This method is required
     public BlockPos getTargetPos() {
         return new BlockPos(targetX, targetY, targetZ);

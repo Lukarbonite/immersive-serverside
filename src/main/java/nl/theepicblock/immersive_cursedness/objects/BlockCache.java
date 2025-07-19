@@ -9,6 +9,7 @@ import net.minecraft.util.math.ChunkPos;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
@@ -49,46 +50,34 @@ public class BlockCache {
 		return size;
 	}
 
-	public synchronized void purge(Chunk2IntMap blockPerChunk, List<FlatStandingRectangle> rects, BiConsumer<BlockPos, BlockState> onRemove) {
-		if (size == blockPerChunk.getTotal()) return;
-
+	public synchronized void purge(Set<BlockPos> blocksInView, BiConsumer<BlockPos, BlockState> onRemove) {
 		var sliceIterator = cache.int2ObjectEntrySet().iterator();
 		while (sliceIterator.hasNext()) {
 			var sliceEntry = sliceIterator.next();
-			int x = sliceEntry.getIntKey();
-			Int2ObjectMap<Map<BlockPos, BlockState>> cacheSlice = sliceEntry.getValue();
-
-			Int2IntMap countSlice = blockPerChunk.getSlice(x);
-			if (countSlice == null) { //there was nothing sent in this entire slice, so it can be purged
-				purge(cacheSlice, onRemove);
-				sliceIterator.remove();
-				continue;
-			}
+			var cacheSlice = sliceEntry.getValue();
 
 			var mapIterator = cacheSlice.int2ObjectEntrySet().iterator();
 			while (mapIterator.hasNext()) {
 				var mapEntry = mapIterator.next();
-				int zPos = mapEntry.getIntKey();
-				int oldZ = mapEntry.getValue().size();
-				int newZ = countSlice.get(zPos);
+				Map<BlockPos, BlockState> map = mapEntry.getValue();
 
-				if (newZ == 0) { //there was nothing sent in this chunk, so it can be purged entirely
-					purge(mapEntry.getValue(), onRemove);
+				map.entrySet().removeIf((entry) -> {
+					BlockPos mapBlockPos = entry.getKey();
+					if (blocksInView.contains(mapBlockPos)) {
+						return false; // Don't purge if it's currently in view
+					}
+					onRemove.accept(mapBlockPos, entry.getValue());
+					size--;
+					return true;
+				});
+
+				if (map.isEmpty()) {
 					mapIterator.remove();
-				} else if (newZ != oldZ) {
-					Map<BlockPos, BlockState> map = mapEntry.getValue();
-					map.entrySet().removeIf((entry) -> {
-						BlockPos mapBlockPos = entry.getKey();
-						for (FlatStandingRectangle rect : rects) {
-							if (rect.contains(mapBlockPos)) {
-								return false;
-							}
-						}
-						onRemove.accept(mapBlockPos, entry.getValue());
-						size--;
-						return true;
-					});
 				}
+			}
+
+			if (cacheSlice.isEmpty()) {
+				sliceIterator.remove();
 			}
 		}
 	}
