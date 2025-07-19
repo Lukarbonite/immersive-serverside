@@ -162,8 +162,9 @@ public class PlayerManager {
         double distanceToPortal = player.getEyePos().distanceTo(portal.toFlatStandingRectangle().getCenter());
         int iterationDepth = (int)Math.ceil(distanceToPortal + atmosphereRadius + 2);
 
-        final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_CONCRETE : Blocks.NETHER_WART_BLOCK).getDefaultState();
-        final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.NETHER ? Blocks.BLUE_STAINED_GLASS : Blocks.RED_STAINED_GLASS).getDefaultState();
+        final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.OVERWORLD ? Blocks.NETHER_WART_BLOCK : Blocks.BLUE_CONCRETE).getDefaultState();
+        final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.OVERWORLD ? Blocks.RED_STAINED_GLASS : Blocks.BLUE_STAINED_GLASS).getDefaultState();
+
         final int bottomOfWorld = sourceWorld.getBottomY();
 
         for (Entity entity : nearbyEntities) {
@@ -191,6 +192,16 @@ public class PlayerManager {
 
                     if (distSq > icConfig.squaredAtmosphereRadiusMinusOne) {
                         atmosphereBlocksInView.add(immutablePos);
+
+                        // Replace the original block with air
+                        blocksInView.add(immutablePos);
+                        BlockState airState = Blocks.AIR.getDefaultState();
+                        BlockState cachedState = blockCache.get(immutablePos);
+                        if (!airState.equals(cachedState)) {
+                            blockCache.put(immutablePos, airState);
+                            blockUpdatesToSend.put(immutablePos, airState);
+                        }
+
                         BlockState atmosphereState = (distSq > icConfig.squaredAtmosphereRadius) ? atmosphereBlock : atmosphereBetweenBlock;
 
                         if (y == bottomOfWorld) atmosphereState = atmosphereBlock;
