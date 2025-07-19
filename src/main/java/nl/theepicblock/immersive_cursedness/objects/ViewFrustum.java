@@ -27,8 +27,13 @@ public class ViewFrustum {
 
     private final Vec3d[] frustumBaseCorners;
 
-    public ViewFrustum(Vec3d origin, Portal portal) {
+    // Fields for atmosphere box calculation
+    private final Vec3d portalCenter;
+    private final double atmosphereRadius;
+
+    public ViewFrustum(Vec3d origin, Portal portal, double atmosphereRadius) {
         this.origin = origin;
+        this.atmosphereRadius = atmosphereRadius;
 
         final Direction.Axis portalPlaneAxis = Util.rotate(portal.getAxis());
         final double playerPlanePos = Util.get(origin, portalPlaneAxis);
@@ -50,6 +55,7 @@ public class ViewFrustum {
                 portal.getLeft(), portal.getRight() + 1.0,
                 frontPlaneCoordinate, portalPlaneAxis
         );
+        this.portalCenter = portalAperture.getCenter(); // Store the portal center
 
         final FlatStandingRectangle backPlane = new FlatStandingRectangle(
                 portalAperture.getTop(), portalAperture.getBottom(),
@@ -109,6 +115,10 @@ public class ViewFrustum {
         this.portalPlaneNormal = new Vec3d(unitVector.x(), unitVector.y(), unitVector.z()).multiply(portalToPlayerSign);
     }
 
+    public ViewFrustum(Vec3d origin, Portal portal) {
+        this(origin, portal, 0); // Keep old constructor for compatibility.
+    }
+
     public Vec3d[] getFrustumBaseCorners() {
         return this.frustumBaseCorners;
     }
@@ -143,7 +153,15 @@ public class ViewFrustum {
             maxZ = Math.max(maxZ, v.z);
         }
 
-        return new Box(minX, minY, minZ, maxX, maxY, maxZ);
+        Box frustumBox = new Box(minX, minY, minZ, maxX, maxY, maxZ);
+
+        // Also include the atmosphere sphere in the iteration box
+        if (this.atmosphereRadius > 0 && this.portalCenter != null) {
+            Box atmosphereBox = new Box(this.portalCenter, this.portalCenter).expand(this.atmosphereRadius + 1.0);
+            return frustumBox.union(atmosphereBox);
+        }
+
+        return frustumBox;
     }
 
     /**
