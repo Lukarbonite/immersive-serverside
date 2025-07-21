@@ -156,7 +156,7 @@ public class PlayerManager {
         final ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal, atmosphereRadius);
 
         double distanceToPortalPlane = Math.abs(Util.get(player.getEyePos(), Util.rotate(portal.getAxis())) - Util.get(portal.getLowerLeft(), Util.rotate(portal.getAxis())));
-        double proximityBuffer = Math.max(0, distanceToPortalPlane + 15);
+        double proximityBuffer = Math.max(0, distanceToPortalPlane + 15); // Magic number I found that works for the last layer problem
         int iterationDepth = (int)Math.ceil(distanceToPortalPlane + atmosphereRadius + proximityBuffer);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.OVERWORLD ? Blocks.NETHER_WART_BLOCK : Blocks.BLUE_CONCRETE).getDefaultState();
@@ -227,7 +227,10 @@ public class PlayerManager {
                             blockCache.put(immutablePos, newState);
                             blockUpdatesToSend.put(immutablePos, newState);
                             if (newBlockEntity != null) {
-                                packetList.add(Util.createFakeBlockEntityPacket(newBlockEntity, immutablePos, sourceWorld));
+                                Packet<?> packet = Util.createFakeBlockEntityPacket(newBlockEntity, immutablePos, sourceWorld);
+                                if (packet != null) {
+                                    packetList.add(packet);
+                                }
                             }
                         }
                     }
@@ -396,7 +399,10 @@ public class PlayerManager {
                 blockUpdatesToSend.put(pos, originalState);
                 BlockEntity originalBlockEntity = sourceView.getBlockEntity(pos);
                 if (originalBlockEntity != null) {
-                    packetsToSend.add(Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld));
+                    Packet<?> packet = Util.createFakeBlockEntityPacket(originalBlockEntity, pos, sourceWorld);
+                    if (packet != null) {
+                        packetsToSend.add(packet);
+                    }
                 }
             }
         });

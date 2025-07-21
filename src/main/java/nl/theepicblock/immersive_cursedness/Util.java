@@ -111,9 +111,12 @@ public class Util {
     public static Packet<ClientPlayPacketListener> createFakeBlockEntityPacket(BlockEntity entity, BlockPos pos, World playerWorld) {
         // The factory method requires the BlockEntity itself.
         // We create a temporary one to ensure the world context is correct for NBT generation.
-        NbtCompound nbt = entity.createNbt(playerWorld.getRegistryManager());
+        NbtCompound nbt = entity.createNbtWithIdentifyingData(playerWorld.getRegistryManager());
         BlockEntity fakeEntity = BlockEntity.createFromNbt(pos, entity.getCachedState(), nbt, playerWorld.getRegistryManager());
-        if (fakeEntity == null) return null;
+        if (fakeEntity == null) {
+            return null;
+        }
+        fakeEntity.setWorld(playerWorld);
         return fakeEntity.toUpdatePacket();
     }
 
