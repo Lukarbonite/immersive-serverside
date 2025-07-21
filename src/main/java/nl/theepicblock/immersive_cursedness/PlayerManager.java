@@ -156,7 +156,7 @@ public class PlayerManager {
         final ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal, atmosphereRadius);
 
         double distanceToPortalPlane = Math.abs(Util.get(player.getEyePos(), Util.rotate(portal.getAxis())) - Util.get(portal.getLowerLeft(), Util.rotate(portal.getAxis())));
-        double proximityBuffer = Math.min(0, distanceToPortalPlane + 15);
+        double proximityBuffer = Math.max(0, distanceToPortalPlane + 15);
         int iterationDepth = (int)Math.ceil(distanceToPortalPlane + atmosphereRadius + proximityBuffer);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.OVERWORLD ? Blocks.NETHER_WART_BLOCK : Blocks.BLUE_CONCRETE).getDefaultState();
