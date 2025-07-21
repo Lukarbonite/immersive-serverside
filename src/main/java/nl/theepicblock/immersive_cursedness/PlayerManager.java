@@ -48,6 +48,8 @@ public class PlayerManager {
     private final Map<Integer, UUID> raycastDebugEntityUuids = new HashMap<>();
     private final List<Integer> cornerRaycastDebugEntityIds = new ArrayList<>();
     private final Map<Integer, UUID> cornerRaycastDebugEntityUuids = new HashMap<>();
+    private final List<Integer> offsetCornerRaycastDebugEntityIds = new ArrayList<>();
+    private final Map<Integer, UUID> offsetCornerRaycastDebugEntityUuids = new HashMap<>();
 
     // For fake entities
     private final Map<UUID, Integer> realToFakeId = new ConcurrentHashMap<>();
@@ -57,6 +59,7 @@ public class PlayerManager {
     private int nextFakeEntityId = -1000000;
     private int nextRaycastDebugEntityId = -2000000;
     private int nextCornerRaycastDebugEntityId = -3000000;
+    private int nextOffsetCornerRaycastDebugEntityId = -4000000;
 
     // For vehicle dismount grace period
     private final Map<UUID, UUID> lastTickVehicleMap = new ConcurrentHashMap<>();
@@ -364,6 +367,7 @@ public class PlayerManager {
 
         final List<Vec3d[]> currentRaycastDebugData = new ArrayList<>();
         final List<Vec3d[]> cornerRaycastDebugData = new ArrayList<>();
+        final List<Vec3d[]> offsetCornerRaycastDebugData = new ArrayList<>();
         final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveCursedness.PORTAL_DEBUG);
 
         for (Portal portal : portalsToProcess) {
@@ -373,19 +377,51 @@ public class PlayerManager {
             processPortalRendering(portal, sourceWorld, blocksInViewPositions, atmosphereBlocksInView, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities, currentRaycastDebugData);
 
             if (debugEnabled) {
-                final double atmosphereRadius = Math.sqrt(icConfig.squaredAtmosphereRadius);
-                final ViewFrustum debugFrustum = new ViewFrustum(player.getEyePos(), portal, atmosphereRadius);
-                final Vec3d[] corners = debugFrustum.getFrustumBaseCorners();
                 final double extensionLength = icConfig.portalDepth;
                 java.util.function.Function<Vec3d, Vec3d> extendRay = (corner) -> {
                     Vec3d direction = corner.subtract(player.getEyePos());
                     if (direction.lengthSquared() < 1e-7) return corner;
                     return player.getEyePos().add(direction.normalize().multiply(extensionLength));
                 };
-                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(corners[2])});
-                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(corners[3])});
-                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(corners[0])});
-                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(corners[1])});
+
+                final Direction.Axis portalPlaneAxis_debug = Util.rotate(portal.getAxis());
+                final double playerPlanePos_debug = Util.get(player.getEyePos(), portalPlaneAxis_debug);
+                final double portalBlockCoordinate_debug = Util.get(portal.getLowerLeft(), portalPlaneAxis_debug);
+                final double frontPlaneCoordinate_debug = (playerPlanePos_debug > portalBlockCoordinate_debug + 0.5)
+                        ? portalBlockCoordinate_debug + 1.0
+                        : portalBlockCoordinate_debug;
+
+                FlatStandingRectangle originalAperture = new FlatStandingRectangle(
+                        portal.getTop() + 1.0, portal.getBottom(),
+                        portal.getLeft(), portal.getRight() + 1.0,
+                        frontPlaneCoordinate_debug, portalPlaneAxis_debug
+                );
+                Vec3d[] originalCorners = {
+                        originalAperture.getTopLeft(), originalAperture.getTopRight(),
+                        originalAperture.getBottomLeft(), originalAperture.getBottomRight()
+                };
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(originalCorners[0])});
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(originalCorners[1])});
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(originalCorners[2])});
+                cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(originalCorners[3])});
+
+                final double FRUSTUM_CORNER_OFFSET = 0.5;
+                FlatStandingRectangle offsetAperture = new FlatStandingRectangle(
+                        portal.getTop() + 1.0 + FRUSTUM_CORNER_OFFSET,
+                        portal.getBottom() - FRUSTUM_CORNER_OFFSET,
+                        portal.getLeft() - FRUSTUM_CORNER_OFFSET,
+                        portal.getRight() + 1.0 + FRUSTUM_CORNER_OFFSET,
+                        frontPlaneCoordinate_debug,
+                        portalPlaneAxis_debug
+                );
+                Vec3d[] offsetCorners = {
+                        offsetAperture.getTopLeft(), offsetAperture.getTopRight(),
+                        offsetAperture.getBottomLeft(), offsetAperture.getBottomRight()
+                };
+                offsetCornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(offsetCorners[0])});
+                offsetCornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(offsetCorners[1])});
+                offsetCornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(offsetCorners[2])});
+                offsetCornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(offsetCorners[3])});
             }
         }
 
@@ -438,7 +474,7 @@ public class PlayerManager {
         processFakeEntities(packetsToSend, destinationEntityMap, portalsToProcess);
 
         if (debugEnabled) {
-            updateDebugEntities(packetsToSend, currentRaycastDebugData, cornerRaycastDebugData);
+            updateDebugEntities(packetsToSend, currentRaycastDebugData, cornerRaycastDebugData, offsetCornerRaycastDebugData);
         } else if (isDebugCleanupNeeded()) {
             purgeDebugEntities(packetsToSend);
         }
@@ -610,7 +646,7 @@ public class PlayerManager {
     }
 
     private boolean isDebugCleanupNeeded() {
-        return !raycastDebugEntityIds.isEmpty() || !cornerRaycastDebugEntityIds.isEmpty();
+        return !raycastDebugEntityIds.isEmpty() || !cornerRaycastDebugEntityIds.isEmpty() || !offsetCornerRaycastDebugEntityIds.isEmpty();
     }
 
     private void purgeDebugEntities() {
@@ -633,29 +669,39 @@ public class PlayerManager {
             cornerRaycastDebugEntityIds.clear();
             cornerRaycastDebugEntityUuids.clear();
         }
+        if (!offsetCornerRaycastDebugEntityIds.isEmpty()) {
+            packetConsumer.accept(new EntitiesDestroyS2CPacket(offsetCornerRaycastDebugEntityIds.stream().mapToInt(i->i).toArray()));
+            offsetCornerRaycastDebugEntityIds.clear();
+            offsetCornerRaycastDebugEntityUuids.clear();
+        }
     }
 
-    private void updateDebugEntities(List<Packet<?>> packets, List<Vec3d[]> raycastData, List<Vec3d[]> cornerRaycastData) {
-        // Raycast Debug Logic
-        if (raycastDebugEntityIds.size() > raycastData.size()) {
+    private void updateDebugEntities(List<Packet<?>> packets, List<Vec3d[]> raycastData, List<Vec3d[]> cornerRaycastData, List<Vec3d[]> offsetCornerRaycastData) {
+        updateDebugRaycastSet(packets, raycastData, raycastDebugEntityIds, raycastDebugEntityUuids, () -> nextRaycastDebugEntityId--, Blocks.RED_CONCRETE.getDefaultState());
+        updateDebugRaycastSet(packets, cornerRaycastData, cornerRaycastDebugEntityIds, cornerRaycastDebugEntityUuids, () -> nextCornerRaycastDebugEntityId--, Blocks.YELLOW_CONCRETE.getDefaultState());
+        updateDebugRaycastSet(packets, offsetCornerRaycastData, offsetCornerRaycastDebugEntityIds, offsetCornerRaycastDebugEntityUuids, () -> nextOffsetCornerRaycastDebugEntityId--, Blocks.GREEN_CONCRETE.getDefaultState());
+    }
+
+    private void updateDebugRaycastSet(List<Packet<?>> packets, List<Vec3d[]> raycastData, List<Integer> entityIds, Map<Integer, UUID> entityUuids, java.util.function.Supplier<Integer> idSupplier, BlockState blockState) {
+        if (entityIds.size() > raycastData.size()) {
             List<Integer> idsToDestroy = new ArrayList<>();
-            while (raycastDebugEntityIds.size() > raycastData.size()) {
-                int id = raycastDebugEntityIds.remove(raycastDebugEntityIds.size() - 1);
+            while (entityIds.size() > raycastData.size()) {
+                int id = entityIds.remove(entityIds.size() - 1);
                 idsToDestroy.add(id);
-                raycastDebugEntityUuids.remove(id);
+                entityUuids.remove(id);
             }
             packets.add(new EntitiesDestroyS2CPacket(idsToDestroy.stream().mapToInt(i -> i).toArray()));
         }
-        while (raycastDebugEntityIds.size() < raycastData.size()) {
-            int fakeId = nextRaycastDebugEntityId--;
+        while (entityIds.size() < raycastData.size()) {
+            int fakeId = idSupplier.get();
             UUID fakeUuid = UUID.randomUUID();
-            raycastDebugEntityIds.add(fakeId);
-            raycastDebugEntityUuids.put(fakeId, fakeUuid);
-            Vec3d start = raycastData.get(raycastDebugEntityIds.size() - 1)[0];
+            entityIds.add(fakeId);
+            entityUuids.put(fakeId, fakeUuid);
+            Vec3d start = raycastData.get(entityIds.size() - 1)[0];
             packets.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, start.x, start.y, start.z, 0, 0, EntityType.BLOCK_DISPLAY, 0, Vec3d.ZERO, 0));
         }
-        for (int i = 0; i < raycastDebugEntityIds.size(); i++) {
-            int id = raycastDebugEntityIds.get(i);
+        for (int i = 0; i < entityIds.size(); i++) {
+            int id = entityIds.get(i);
             Vec3d[] ray = raycastData.get(i);
             Vec3d start = ray[0];
             Vec3d end = ray[1];
@@ -663,61 +709,7 @@ public class PlayerManager {
             packets.add(new EntityPositionS2CPacket(id, new PlayerPosition(start, Vec3d.ZERO, 0, 0), Collections.emptySet(), true));
 
             DisplayEntity.BlockDisplayEntity tempDisplay = new DisplayEntity.BlockDisplayEntity(EntityType.BLOCK_DISPLAY, player.getWorld());
-            tempDisplay.setBlockState(Blocks.RED_CONCRETE.getDefaultState());
-            tempDisplay.setDisplayWidth(1.0f);
-            tempDisplay.setDisplayHeight(1.0f);
-            tempDisplay.setViewRange(icConfig.renderDistance * 16.0f + icConfig.portalDepth);
-
-            Vec3d dir = end.subtract(start);
-            float length = (float) dir.length();
-            if (length > 1e-5f) {
-                dir = dir.normalize();
-            }
-
-            Vector3f translation = new Vector3f(0.0f, 0.0f, 0.0f);
-            Quaternionf leftRotation = new Quaternionf().rotationTo(new Vector3f(0.0f, 0.0f, 1.0f), new Vector3f((float)dir.x, (float)dir.y, (float)dir.z));
-            Vector3f scale = new Vector3f(0.05f, 0.05f, length);
-            Quaternionf rightRotation = new Quaternionf();
-            AffineTransformation transform = new AffineTransformation(translation, leftRotation, scale, rightRotation);
-
-            tempDisplay.setTransformation(transform);
-            tempDisplay.setInterpolationDuration(0);
-            tempDisplay.setStartInterpolation(0);
-
-            List<DataTracker.SerializedEntry<?>> trackedValues = tempDisplay.getDataTracker().getChangedEntries();
-            if (trackedValues != null && !trackedValues.isEmpty()) {
-                packets.add(new EntityTrackerUpdateS2CPacket(id, trackedValues));
-            }
-        }
-
-        // Corner Raycast Debug Logic
-        if (cornerRaycastDebugEntityIds.size() > cornerRaycastData.size()) {
-            List<Integer> idsToDestroy = new ArrayList<>();
-            while (cornerRaycastDebugEntityIds.size() > cornerRaycastData.size()) {
-                int id = cornerRaycastDebugEntityIds.remove(cornerRaycastDebugEntityIds.size() - 1);
-                idsToDestroy.add(id);
-                cornerRaycastDebugEntityUuids.remove(id);
-            }
-            packets.add(new EntitiesDestroyS2CPacket(idsToDestroy.stream().mapToInt(i -> i).toArray()));
-        }
-        while (cornerRaycastDebugEntityIds.size() < cornerRaycastData.size()) {
-            int fakeId = nextCornerRaycastDebugEntityId--;
-            UUID fakeUuid = UUID.randomUUID();
-            cornerRaycastDebugEntityIds.add(fakeId);
-            cornerRaycastDebugEntityUuids.put(fakeId, fakeUuid);
-            Vec3d start = cornerRaycastData.get(cornerRaycastDebugEntityIds.size() - 1)[0];
-            packets.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, start.x, start.y, start.z, 0, 0, EntityType.BLOCK_DISPLAY, 0, Vec3d.ZERO, 0));
-        }
-        for (int i = 0; i < cornerRaycastDebugEntityIds.size(); i++) {
-            int id = cornerRaycastDebugEntityIds.get(i);
-            Vec3d[] ray = cornerRaycastData.get(i);
-            Vec3d start = ray[0];
-            Vec3d end = ray[1];
-
-            packets.add(new EntityPositionS2CPacket(id, new PlayerPosition(start, Vec3d.ZERO, 0, 0), Collections.emptySet(), true));
-
-            DisplayEntity.BlockDisplayEntity tempDisplay = new DisplayEntity.BlockDisplayEntity(EntityType.BLOCK_DISPLAY, player.getWorld());
-            tempDisplay.setBlockState(Blocks.YELLOW_CONCRETE.getDefaultState());
+            tempDisplay.setBlockState(blockState);
             tempDisplay.setDisplayWidth(1.0f);
             tempDisplay.setDisplayHeight(1.0f);
             tempDisplay.setViewRange(icConfig.renderDistance * 16.0f + icConfig.portalDepth);

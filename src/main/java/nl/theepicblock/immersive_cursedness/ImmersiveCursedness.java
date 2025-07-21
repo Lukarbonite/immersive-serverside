@@ -20,11 +20,13 @@ public class ImmersiveCursedness implements ModInitializer {
     public static Thread cursednessThread;
     public static CursednessServer cursednessServer;
     public static GameRules.Key<GameRules.BooleanRule> PORTAL_DEBUG;
+    public static GameRules.Key<GameRules.IntRule> PORTAL_HZ;
 
     @Override
     public void onInitialize() {
         AutoConfig.register(IC_Config.class, JanksonConfigSerializer::new);
         PORTAL_DEBUG = GameRuleRegistry.register("portalDebug", GameRules.Category.MISC, GameRuleFactory.createBooleanRule(false));
+        PORTAL_HZ = GameRuleRegistry.register("portalHz", GameRules.Category.MISC, GameRuleFactory.createIntRule(125, 1, 1000));
 
         ServerLifecycleEvents.SERVER_STARTED.register(minecraftServer -> {
             cursednessServer = new CursednessServer(minecraftServer);

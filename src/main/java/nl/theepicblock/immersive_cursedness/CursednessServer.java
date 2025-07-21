@@ -45,7 +45,12 @@ public class CursednessServer implements Runnable {
                 ImmersiveCursedness.LOGGER.warn("Exception occurred whilst ticking the Immersive Cursedness thread. This is probably not bad unless it's spamming your console", e);
             }
 
-            nextTick = System.currentTimeMillis() + 50; // 20 ticks per second
+            int portalHz = server.getOverworld().getGameRules().getInt(ImmersiveCursedness.PORTAL_HZ);
+            if (portalHz <= 0) {
+                portalHz = 1;
+            }
+            long delay = 1000 / portalHz;
+            nextTick = System.currentTimeMillis() + delay;
         }
         ImmersiveCursedness.LOGGER.info("Immersive Cursedness thread stopped.");
     }

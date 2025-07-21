@@ -14,6 +14,7 @@ import java.util.Arrays;
  * This is used for perspective-correct culling.
  */
 public class ViewFrustum {
+    private static final double FRUSTUM_CORNER_OFFSET = 0.5;
     private final Vec3d origin;
     // The portal's plane, used for near-plane clipping
     private final Vec3d portalPlaneNormal;
@@ -51,8 +52,10 @@ public class ViewFrustum {
         }
 
         final FlatStandingRectangle portalAperture = new FlatStandingRectangle(
-                portal.getTop() + 1.0, portal.getBottom(),
-                portal.getLeft(), portal.getRight() + 1.0,
+                portal.getTop() + 1.0 + FRUSTUM_CORNER_OFFSET,
+                portal.getBottom() - FRUSTUM_CORNER_OFFSET,
+                portal.getLeft() - FRUSTUM_CORNER_OFFSET,
+                portal.getRight() + 1.0 + FRUSTUM_CORNER_OFFSET,
                 frontPlaneCoordinate, portalPlaneAxis
         );
         this.portalCenter = portalAperture.getCenter(); // Store the portal center
