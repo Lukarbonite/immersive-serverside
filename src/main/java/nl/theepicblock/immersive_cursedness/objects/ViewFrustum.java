@@ -157,11 +157,11 @@ public class ViewFrustum {
 
         // Also include the atmosphere sphere in the iteration box
         if (this.atmosphereRadius > 0 && this.portalCenter != null) {
-            Box atmosphereBox = new Box(this.portalCenter, this.portalCenter).expand(this.atmosphereRadius + 1.0);
-            return frustumBox.union(atmosphereBox);
+            Box atmosphereBox = new Box(this.portalCenter, this.portalCenter).expand(this.atmosphereRadius);
+            return frustumBox.union(atmosphereBox).expand(1.0);
         }
 
-        return frustumBox;
+        return frustumBox.expand(1.0);
     }
 
     /**

@@ -58,10 +58,6 @@ public class PlayerManager {
     private int nextRaycastDebugEntityId = -2000000;
     private int nextCornerRaycastDebugEntityId = -3000000;
 
-    // For atmosphere entities
-    private final Map<BlockPos, Integer> atmosphereEntities = new ConcurrentHashMap<>();
-    private int nextAtmosphereEntityId = -4000000;
-
     // For vehicle dismount grace period
     private final Map<UUID, UUID> lastTickVehicleMap = new ConcurrentHashMap<>();
 
@@ -159,8 +155,9 @@ public class PlayerManager {
         final double atmosphereRadius = Math.sqrt(icConfig.squaredAtmosphereRadius);
         final ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal, atmosphereRadius);
 
-        double distanceToPortal = player.getEyePos().distanceTo(portal.toFlatStandingRectangle().getCenter());
-        int iterationDepth = (int)Math.ceil(distanceToPortal + atmosphereRadius + 2);
+        double distanceToPortalPlane = Math.abs(Util.get(player.getEyePos(), Util.rotate(portal.getAxis())) - Util.get(portal.getLowerLeft(), Util.rotate(portal.getAxis())));
+        double proximityBuffer = Math.min(0, distanceToPortalPlane + 15);
+        int iterationDepth = (int)Math.ceil(distanceToPortalPlane + atmosphereRadius + proximityBuffer);
 
         final BlockState atmosphereBlock = (sourceWorld.getRegistryKey() == World.OVERWORLD ? Blocks.NETHER_WART_BLOCK : Blocks.BLUE_CONCRETE).getDefaultState();
         final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.OVERWORLD ? Blocks.RED_STAINED_GLASS : Blocks.BLUE_STAINED_GLASS).getDefaultState();
@@ -176,11 +173,11 @@ public class PlayerManager {
         Box iterationBox = viewFrustum.getIterationBox(iterationDepth);
         BlockPos.Mutable mutPos = new BlockPos.Mutable();
 
-        for (int y = (int) iterationBox.minY; y < iterationBox.maxY; y++) {
+        for (int y = MathHelper.floor(iterationBox.minY); y < MathHelper.ceil(iterationBox.maxY); y++) {
             mutPos.setY(y);
-            for (int x = (int) iterationBox.minX; x < iterationBox.maxX; x++) {
+            for (int x = MathHelper.floor(iterationBox.minX); x < MathHelper.ceil(iterationBox.maxX); x++) {
                 mutPos.setX(x);
-                for (int z = (int) iterationBox.minZ; z < iterationBox.maxZ; z++) {
+                for (int z = MathHelper.floor(iterationBox.minZ); z < MathHelper.ceil(iterationBox.maxZ); z++) {
                     mutPos.setZ(z);
 
                     if (!viewFrustum.contains(mutPos) || isFrameBlock(mutPos, portal, sourceView)) {
@@ -191,49 +188,16 @@ public class PlayerManager {
                     double distSq = portal.toFlatStandingRectangle().getCenter().squaredDistanceTo(mutPos.toCenterPos());
 
                     if (distSq > icConfig.squaredAtmosphereRadiusMinusOne) {
-                        atmosphereBlocksInView.add(immutablePos);
-
-                        // Replace the original block with air
                         blocksInView.add(immutablePos);
-                        BlockState airState = Blocks.AIR.getDefaultState();
-                        BlockState cachedState = blockCache.get(immutablePos);
-                        if (!airState.equals(cachedState)) {
-                            blockCache.put(immutablePos, airState);
-                            blockUpdatesToSend.put(immutablePos, airState);
-                        }
-
                         BlockState atmosphereState = (distSq > icConfig.squaredAtmosphereRadius) ? atmosphereBlock : atmosphereBetweenBlock;
 
                         if (y == bottomOfWorld) atmosphereState = atmosphereBlock;
                         if (y == bottomOfWorld + 1) atmosphereState = atmosphereBetweenBlock;
 
-                        if (!atmosphereEntities.containsKey(immutablePos)) {
-                            int fakeId = nextAtmosphereEntityId--;
-                            UUID fakeUuid = UUID.randomUUID();
-                            atmosphereEntities.put(immutablePos, fakeId);
-
-                            final float scale = 1.01f;
-                            final float offset = (scale - 1.0f) / 2.0f;
-
-                            final double entityX = immutablePos.getX() + 0.5;
-                            final double entityY = immutablePos.getY() - offset;
-                            final double entityZ = immutablePos.getZ() + 0.5;
-
-                            packetList.add(new EntitySpawnS2CPacket(fakeId, fakeUuid, entityX, entityY, entityZ, 0, 0, EntityType.BLOCK_DISPLAY, 0, Vec3d.ZERO, 0));
-
-                            DisplayEntity.BlockDisplayEntity tempDisplay = new DisplayEntity.BlockDisplayEntity(EntityType.BLOCK_DISPLAY, player.getWorld());
-                            tempDisplay.setBlockState(atmosphereState);
-                            tempDisplay.setDisplayWidth(scale);
-                            tempDisplay.setDisplayHeight(scale);
-                            tempDisplay.setViewRange((float) (icConfig.renderDistance * 16.0f + iterationDepth));
-                            tempDisplay.setTransformation(new AffineTransformation(new Vector3f(0.0f, scale / 2.0f, 0.0f), null, new Vector3f(scale), null));
-                            tempDisplay.setInterpolationDuration(0);
-                            tempDisplay.setStartInterpolation(0);
-
-                            List<DataTracker.SerializedEntry<?>> trackedValues = tempDisplay.getDataTracker().getChangedEntries();
-                            if (trackedValues != null && !trackedValues.isEmpty()) {
-                                packetList.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
-                            }
+                        BlockState cachedState = blockCache.get(immutablePos);
+                        if (!atmosphereState.equals(cachedState)) {
+                            blockCache.put(immutablePos, atmosphereState);
+                            blockUpdatesToSend.put(immutablePos, atmosphereState);
                         }
                     } else {
                         blocksInView.add(immutablePos);
@@ -420,19 +384,6 @@ public class PlayerManager {
                 cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(corners[0])});
                 cornerRaycastDebugData.add(new Vec3d[]{player.getEyePos(), extendRay.apply(corners[1])});
             }
-        }
-
-        List<Integer> atmosphereIdsToDestroy = new ArrayList<>();
-        atmosphereEntities.entrySet().removeIf(entry -> {
-            if (!atmosphereBlocksInView.contains(entry.getKey())) {
-                atmosphereIdsToDestroy.add(entry.getValue());
-                return true;
-            }
-            return false;
-        });
-
-        if (!atmosphereIdsToDestroy.isEmpty()) {
-            packetsToSend.add(new EntitiesDestroyS2CPacket(atmosphereIdsToDestroy.stream().mapToInt(i -> i).toArray()));
         }
 
         blockCache.purge(blocksInViewPositions, (pos, cachedState) -> {
@@ -806,9 +757,6 @@ public class PlayerManager {
             if (originalState != cachedState) updatesToSend.put(pos, originalState);
         });
 
-        List<Integer> atmosphereIdsToDestroy = new ArrayList<>(atmosphereEntities.values());
-        atmosphereEntities.clear();
-
         List<Entity> entitiesToShow = new ArrayList<>();
         if (!hiddenEntities.isEmpty()) {
             ServerWorld sourceWorld = player.getWorld();
@@ -837,10 +785,6 @@ public class PlayerManager {
             if (!player.networkHandler.isConnectionOpen()) return;
             purgeDebugEntities(player.networkHandler::sendPacket);
             updatesToSend.sendTo(player);
-
-            if (!atmosphereIdsToDestroy.isEmpty()) {
-                player.networkHandler.sendPacket(new EntitiesDestroyS2CPacket(atmosphereIdsToDestroy.stream().mapToInt(i->i).toArray()));
-            }
 
             for (Entity entity : entitiesToShow) {
                 new EntityTrackerEntry(player.getWorld(), entity, 0, false, (p) -> {}, (p, l) -> {}).sendPackets(player, player.networkHandler::sendPacket);
