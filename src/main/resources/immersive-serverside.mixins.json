@@ -1,0 +1,20 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.lukarbonite.immersive_serverside.mixin",
+  "compatibilityLevel": "JAVA_16",
+  "mixins": [
+    "EntityPositionS2CPacketAccessor",
+    "EntitySetHeadYawS2CPacketAccessor",
+    "MixinServerPlayerEntity",
+    "NetherPortalBlockMixin",
+    "PortalForcerMixin",
+    "ServerChunkManagerInvoker",
+    "interdimensionalpackets.MixinInteractionManager",
+    "interdimensionalpackets.ServerPlayNetworkHandlerMixin"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

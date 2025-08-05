@@ -1,36 +1,36 @@
 {
   "schemaVersion": 1,
-  "id": "immersive-cursedness",
+  "id": "immersive-serverside",
   "version": "${version}",
 
-  "name": "Immersive Cursedness",
-  "description": "Immersive portals but serverside. Together with some lovely cursed multithreading",
+  "name": "Immersive Serverside",
+  "description": "Immersive portals but serverside.",
   "authors": [
-    "TheEpicBlock"
+    "Lukarbonite"
   ],
   "contact": {
-    "homepage": "https://github.com/TheEpicBlock/immersive-cursedness/blob/master/README.md",
-    "sources": "https://github.com/TheEpicBlock/immersive-cursedness"
+    "homepage": "https://github.com/Lukarbonite/immersive-serverside/blob/master/README.md",
+    "sources": "https://github.com/Lukarbonite/immersive-serverside"
   },
 
   "license": "LGPL",
-  "icon": "assets/immersive-cursedness/icon.png",
+  "icon": "assets/immersive-serverside/icon.png",
 
   "environment": "*",
   "entrypoints": {
     "main": [
-      "nl.theepicblock.immersive_cursedness.ImmersiveCursedness"
+      "com.lukarbonite.immersive_serverside.ImmersiveServerside"
     ]
   },
   "mixins": [
-    "immersive-cursedness.mixins.json"
+    "immersive-serverside.mixins.json"
   ],
 
   "depends": {
     "fabricloader": ">=0.7.4",
     "fabric": "*",
     "minecraft": "1.21.x",
-    "java": ">=16"
+    "java": ">=21"
   },
   "suggests": {
   }

@@ -1,7 +1,5 @@
 plugins {
-	id "com.modrinth.minotaur" version "1.2.1"
 	id 'fabric-loom' version '1.10-SNAPSHOT'
-	id 'maven-publish'
 }
 
 sourceCompatibility = JavaVersion.VERSION_21
@@ -9,7 +7,6 @@ targetCompatibility = JavaVersion.VERSION_21
 
 archivesBaseName = project.archives_base_name
 version = project.mod_version
-group = project.maven_group
 
 repositories {
 	maven { url "https://maven.shedaniel.me/" }
@@ -35,28 +32,7 @@ processResources {
 	}
 }
 
-task publishModrinth (type: com.modrinth.minotaur.TaskModrinthUpload, dependsOn: remapJar) {
-	doFirst {
-		var modrinthToken = System.getenv("MODRINTH_TOKEN")
-		var changelogEnv = System.getenv("CHANGELOG")
-		var versionNameEnv = System.getenv("NAME")
-		if (modrinthToken == null || changelogEnv == null) {
-			throw new RuntimeException("Didn't find correct env variables")
-		}
 
-		token = modrinthToken
-		// An environment property called MODRINTH that is your token, set via Gradle CLI, GitHub Actions, Idea Run Configuration, or other
-		projectId = project.modrinth_project
-		uploadFile = remapJar
-
-		addLoader('fabric')
-		addGameVersion(project.minecraft_version)
-
-		versionNumber = project.mod_version
-		versionName = versionNameEnv
-		changelog = changelogEnv
-	}
-}
 
 tasks.withType(JavaCompile).configureEach {
 	// ensure that the encoding is set to UTF-8, no matter what the system default is
@@ -79,28 +55,5 @@ java {
 jar {
 	from("LICENSE") {
 		rename { "${it}_${project.archivesBaseName}"}
-	}
-}
-
-// configure the maven publication
-publishing {
-	publications {
-		mavenJava(MavenPublication) {
-			// add all the jars that should be included when publishing to maven
-			artifact(remapJar) {
-				builtBy remapJar
-			}
-			artifact(sourcesJar) {
-				builtBy remapSourcesJar
-			}
-		}
-	}
-
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
-	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
 	}
 }
