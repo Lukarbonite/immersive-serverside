@@ -43,12 +43,13 @@ public class ViewFrustum {
         final double frontPlaneCoordinate;
         final double backPlaneCoordinate;
 
+        // Corrected logic: The rendering aperture (frontPlaneCoordinate) should be on the back plane of the portal blocks.
         if (playerPlanePos > portalBlockCoordinate + 0.5) {
-            frontPlaneCoordinate = portalBlockCoordinate + 1.0;
-            backPlaneCoordinate = portalBlockCoordinate;
+            frontPlaneCoordinate = portalBlockCoordinate; // Back plane
+            backPlaneCoordinate = portalBlockCoordinate + 1.0; // Front plane
         } else {
-            frontPlaneCoordinate = portalBlockCoordinate;
-            backPlaneCoordinate = portalBlockCoordinate + 1.0;
+            frontPlaneCoordinate = portalBlockCoordinate + 1.0; // Back plane
+            backPlaneCoordinate = portalBlockCoordinate; // Front plane
         }
 
         final FlatStandingRectangle portalAperture = new FlatStandingRectangle(

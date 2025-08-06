@@ -385,14 +385,15 @@ public class PlayerManager {
                 final Direction.Axis portalPlaneAxis_debug = Util.rotate(portal.getAxis());
                 final double playerPlanePos_debug = Util.get(player.getEyePos(), portalPlaneAxis_debug);
                 final double portalBlockCoordinate_debug = Util.get(portal.getLowerLeft(), portalPlaneAxis_debug);
-                final double frontPlaneCoordinate_debug = (playerPlanePos_debug > portalBlockCoordinate_debug + 0.5)
-                        ? portalBlockCoordinate_debug + 1.0
-                        : portalBlockCoordinate_debug;
+                // Corrected logic: The debug aperture should also be on the back plane of the portal blocks.
+                final double aperturePlaneCoordinate_debug = (playerPlanePos_debug > portalBlockCoordinate_debug + 0.5)
+                        ? portalBlockCoordinate_debug
+                        : portalBlockCoordinate_debug + 1.0;
 
                 FlatStandingRectangle originalAperture = new FlatStandingRectangle(
                         portal.getTop() + 1.0, portal.getBottom(),
                         portal.getLeft(), portal.getRight() + 1.0,
-                        frontPlaneCoordinate_debug, portalPlaneAxis_debug
+                        aperturePlaneCoordinate_debug, portalPlaneAxis_debug
                 );
                 Vec3d[] originalCorners = {
                         originalAperture.getTopLeft(), originalAperture.getTopRight(),
@@ -409,7 +410,7 @@ public class PlayerManager {
                         portal.getBottom() - FRUSTUM_CORNER_OFFSET,
                         portal.getLeft() - FRUSTUM_CORNER_OFFSET,
                         portal.getRight() + 1.0 + FRUSTUM_CORNER_OFFSET,
-                        frontPlaneCoordinate_debug,
+                        aperturePlaneCoordinate_debug,
                         portalPlaneAxis_debug
                 );
                 Vec3d[] offsetCorners = {
