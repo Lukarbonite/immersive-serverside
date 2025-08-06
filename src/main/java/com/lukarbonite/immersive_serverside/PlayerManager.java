@@ -73,6 +73,8 @@ public class PlayerManager {
     private volatile Map<UUID, Entity> destinationEntityMap = new HashMap<>();
     private volatile List<Portal> portalsToProcess = new ArrayList<>();
     private volatile Map<UUID, Entity> entitiesToUpdateOnMainThread = new HashMap<>();
+    private final Set<BlockPos> previouslyVisibleBlocks = new HashSet<>();
+
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, ServersideServer serversideServer) {
         this.player = player;
@@ -385,7 +387,6 @@ public class PlayerManager {
                 final Direction.Axis portalPlaneAxis_debug = Util.rotate(portal.getAxis());
                 final double playerPlanePos_debug = Util.get(player.getEyePos(), portalPlaneAxis_debug);
                 final double portalBlockCoordinate_debug = Util.get(portal.getLowerLeft(), portalPlaneAxis_debug);
-                // Corrected logic: The debug aperture should also be on the back plane of the portal blocks.
                 final double aperturePlaneCoordinate_debug = (playerPlanePos_debug > portalBlockCoordinate_debug + 0.5)
                         ? portalBlockCoordinate_debug
                         : portalBlockCoordinate_debug + 1.0;
@@ -424,7 +425,10 @@ public class PlayerManager {
             }
         }
 
-        blockCache.purge(blocksInViewPositions, (pos, cachedState) -> {
+        Set<BlockPos> blocksToPurge = new HashSet<>(this.previouslyVisibleBlocks);
+        blocksToPurge.removeAll(blocksInViewPositions);
+
+        blockCache.purgePositions(blocksToPurge, (pos, cachedState) -> {
             if (sourceView.getBlock(pos).isOf(Blocks.NETHER_PORTAL) && !portalsToProcess.isEmpty()) {
                 return;
             }
@@ -441,6 +445,9 @@ public class PlayerManager {
                 }
             }
         });
+
+        this.previouslyVisibleBlocks.clear();
+        this.previouslyVisibleBlocks.addAll(blocksInViewPositions);
 
         ((PlayerInterface) player).immersivecursedness$setCloseToPortal(isNearPortal);
 
@@ -749,6 +756,7 @@ public class PlayerManager {
         final AsyncWorldView viewForLambda = this.sourceView != null ? this.sourceView : new AsyncWorldView(player.getWorld());
         ((PlayerInterface) player).immersivecursedness$setCloseToPortal(false);
 
+        this.previouslyVisibleBlocks.clear();
         blockCache.purgeAll((pos, cachedState) -> {
             BlockState originalState = viewForLambda.getBlock(pos);
             if (originalState != cachedState) updatesToSend.put(pos, originalState);
