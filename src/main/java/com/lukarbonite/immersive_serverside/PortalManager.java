@@ -41,7 +41,8 @@ public class PortalManager {
         portalGracePeriods.entrySet().removeIf(entry -> {
             boolean expired = entry.getValue() <= 0;
             if (expired) {
-                // When a portal expires, we should also release the chunk ticket
+                // When a portal's grace period expires, it is confirmed to be gone.
+                // We release the chunk ticket and remove it from our tracking maps.
                 TransformProfile profile = transformProfileCache.get(entry.getKey());
                 if (profile != null) {
                     BlockPos targetPos = profile.getTargetPos();
@@ -89,22 +90,26 @@ public class PortalManager {
             if (currentPortalBlocks.isEmpty()) continue;
 
             BlockPos portalKey = Util.getCanonicalPos(currentPortalBlocks);
+            // Refresh the grace period so this portal isn't removed.
             portalGracePeriods.put(portalKey, GRACE_PERIOD_TICKS);
 
-            // Get or create the transformation profile.
-            TransformProfile transformProfile = transformProfileCache.computeIfAbsent(portalKey, k -> createTransformProfile(k, destination));
-
-            if (transformProfile == null) {
-                ImmersiveServerside.LOGGER.warn("Could not create a valid teleport target for portal at " + portalKey);
-                continue;
-            }
-
-            // The corrected chunk ticket logic:
-            BlockPos targetPos = transformProfile.getTargetPos();
-            // CORRECTED: addTicket only takes 3 arguments
-            destination.getChunkManager().addTicket(ChunkTicketType.PORTAL, new ChunkPos(targetPos), 3);
-
+            // If this is a new portal, create it, cache its transform, and add a chunk ticket.
             if (!portals.containsKey(portalKey)) {
+                // Get or create the transformation profile.
+                TransformProfile transformProfile = transformProfileCache.computeIfAbsent(portalKey, k -> createTransformProfile(k, destination));
+
+                if (transformProfile == null) {
+                    ImmersiveServerside.LOGGER.warn("Could not create a valid teleport target for portal at " + portalKey);
+                    transformProfileCache.remove(portalKey); // Clean up failed creation
+                    continue;
+                }
+
+                // Add a chunk ticket for the destination since it's a newly discovered portal.
+                BlockPos targetPos = transformProfile.getTargetPos();
+                // CORRECTED: addTicket only takes 3 arguments
+                destination.getChunkManager().addTicket(ChunkTicketType.PORTAL, new ChunkPos(targetPos), 3);
+
+                // Create and store the new portal object.
                 BlockState startBlockState = worldView.getBlock(startPos);
                 if (!startBlockState.contains(NetherPortalBlock.AXIS)) continue;
 
