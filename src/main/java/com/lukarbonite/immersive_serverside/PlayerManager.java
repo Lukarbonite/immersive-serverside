@@ -22,7 +22,10 @@ import net.minecraft.server.network.EntityTrackerEntry;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.TypeFilter;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
+import net.minecraft.world.RaycastContext;
 import net.minecraft.world.World;
 import com.lukarbonite.immersive_serverside.mixin.EntitySetHeadYawS2CPacketAccessor;
 import org.jetbrains.annotations.Nullable;
@@ -63,6 +66,7 @@ public class PlayerManager {
     private final Map<UUID, UUID> lastTickVehicleMap = new ConcurrentHashMap<>();
 
     private static final int FLICKER_GUARD_TICKS = 5;
+    private static final double TANGENT_INSET = 0.1; // Inset from the frame edge to stabilize raycast
 
     private AsyncWorldView sourceView;
     private AsyncWorldView destinationView;
@@ -81,6 +85,7 @@ public class PlayerManager {
     private Vec3d lastPlayerPosForFrustumCache = Vec3d.ZERO;
     private Vec2f lastPlayerLookForFrustumCache = Vec2f.ZERO;
 
+    private enum TangentSide { TOP, BOTTOM, LEFT, RIGHT }
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, ServersideServer serversideServer) {
         this.player = player;
@@ -270,27 +275,110 @@ public class PlayerManager {
     }
 
     private boolean isOccludedByOppositeFrame(Portal portal, AsyncWorldView worldView, List<Vec3d[]> raycastDebugData) {
-        final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveServerside.PORTAL_DEBUG);
-        if (debugEnabled) {
-            final Vec3d playerEyePos = player.getEyePos();
-            final Vec3d[] tangentPoints = getTangentPoints(portal, playerEyePos);
-            Vec3d closestTangentPoint = null;
-            double minDistanceSq = Double.MAX_VALUE;
+        final Vec3d playerEyePos = player.getEyePos();
+        final Map<TangentSide, Vec3d> tangentPoints = getTangentPoints(portal, playerEyePos);
 
-            for (Vec3d tangentPoint : tangentPoints) {
-                double distSq = playerEyePos.squaredDistanceTo(tangentPoint);
-                if (distSq < minDistanceSq) {
-                    minDistanceSq = distSq;
-                    closestTangentPoint = tangentPoint;
-                }
-            }
-            if (closestTangentPoint != null) {
-                Vec3d direction = closestTangentPoint.subtract(playerEyePos).normalize();
-                Vec3d extendedEndPoint = closestTangentPoint.add(direction.multiply(10.0));
-                raycastDebugData.add(new Vec3d[]{playerEyePos, extendedEndPoint});
+        if (tangentPoints.isEmpty()) {
+            return false;
+        }
+
+        // Find the tangent point closest to the player
+        Vec3d shortestRayTangentPoint = null;
+        TangentSide shortestRaySide = null;
+        double minDistanceSq = Double.MAX_VALUE;
+
+        for (Map.Entry<TangentSide, Vec3d> entry : tangentPoints.entrySet()) {
+            double distSq = playerEyePos.squaredDistanceTo(entry.getValue());
+            if (distSq < minDistanceSq) {
+                minDistanceSq = distSq;
+                shortestRayTangentPoint = entry.getValue();
+                shortestRaySide = entry.getKey();
             }
         }
-        return false;
+
+        if (shortestRayTangentPoint == null) {
+            return false;
+        }
+
+        // Extend the ray from the player's eye through the tangent point
+        final Vec3d start = playerEyePos;
+        final Vec3d direction = shortestRayTangentPoint.subtract(start).normalize();
+        final Vec3d end = start.add(direction.multiply(icConfig.portalDepth));
+
+        final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveServerside.PORTAL_DEBUG);
+        if (debugEnabled) {
+            raycastDebugData.add(new Vec3d[]{start, end});
+        }
+
+        BlockHitResult hitResult = worldView.raycast(new RaycastContext(start, end, RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, player));
+
+        if (hitResult.getType() == HitResult.Type.MISS) {
+            return false; // Ray didn't hit anything, so no occlusion.
+        }
+
+        BlockPos hitPos = hitResult.getBlockPos();
+        BlockState hitState = worldView.getBlock(hitPos);
+
+        // Check if the hit block is solid and part of the opposite frame.
+        return hitState.isOpaqueFullCube() && isBlockOnOppositeFrame(hitPos, portal, shortestRaySide);
+    }
+
+    private boolean isBlockOnOppositeFrame(BlockPos blockPos, Portal portal, TangentSide tangentSide) {
+        Direction.Axis contentAxis = portal.getAxis();
+        int y = blockPos.getY();
+        int axisCoord = Util.get(blockPos, contentAxis);
+
+        int topY = portal.getTop() + 1;
+        int bottomY = portal.getBottom() - 1;
+        int left = portal.getLeft() - 1;
+        int right = portal.getRight() + 1;
+
+        boolean isTopFrame = y == topY && (axisCoord >= left && axisCoord <= right);
+        boolean isBottomFrame = y == bottomY && (axisCoord >= left && axisCoord <= right);
+        boolean isLeftFrame = axisCoord == left && (y >= bottomY && y <= topY);
+        boolean isRightFrame = axisCoord == right && (y >= bottomY && y <= topY);
+
+        return switch (tangentSide) {
+            case TOP -> isBottomFrame;
+            case BOTTOM -> isTopFrame;
+            case LEFT -> isRightFrame;
+            case RIGHT -> isLeftFrame;
+        };
+    }
+
+    private Map<TangentSide, Vec3d> getTangentPoints(Portal portal, Vec3d playerEyePos) {
+        Direction.Axis contentAxis = portal.getAxis();
+        Direction.Axis planeAxis = Util.rotate(contentAxis);
+
+        double portalBlockPlaneCoord = Util.get(portal.getLowerLeft(), planeAxis);
+        double playerPlaneCoord = Util.get(playerEyePos, planeAxis);
+
+        // Determine the coordinate of the plane face closest to the player.
+        double closePlaneCoordinate = (playerPlaneCoord > portalBlockPlaneCoord + 0.5) ? portalBlockPlaneCoord + 1.0 : portalBlockPlaneCoord;
+
+        // Define the frame edges and inset them slightly to prevent floating point instability
+        double topY = portal.getTop() + 1.0 - TANGENT_INSET;
+        double bottomY = portal.getBottom() + TANGENT_INSET;
+        double left = portal.getLeft() + TANGENT_INSET;
+        double right = portal.getRight() + 1.0 - TANGENT_INSET;
+
+        double midContentAxis = (portal.getLeft() + portal.getRight() + 1.0) / 2.0;
+        double midY = (portal.getBottom() + portal.getTop() + 1.0) / 2.0;
+
+        Map<TangentSide, Vec3d> points = new EnumMap<>(TangentSide.class);
+
+        if (planeAxis == Direction.Axis.X) {
+            points.put(TangentSide.TOP, new Vec3d(closePlaneCoordinate, topY, midContentAxis));
+            points.put(TangentSide.BOTTOM, new Vec3d(closePlaneCoordinate, bottomY, midContentAxis));
+            points.put(TangentSide.LEFT, new Vec3d(closePlaneCoordinate, midY, left));
+            points.put(TangentSide.RIGHT, new Vec3d(closePlaneCoordinate, midY, right));
+        } else { // planeAxis == Z
+            points.put(TangentSide.TOP, new Vec3d(midContentAxis, topY, closePlaneCoordinate));
+            points.put(TangentSide.BOTTOM, new Vec3d(midContentAxis, bottomY, closePlaneCoordinate));
+            points.put(TangentSide.LEFT, new Vec3d(left, midY, closePlaneCoordinate));
+            points.put(TangentSide.RIGHT, new Vec3d(right, midY, closePlaneCoordinate));
+        }
+        return points;
     }
 
     private boolean isFrameBlock(BlockPos pos, Portal portal, AsyncWorldView worldView) {
@@ -320,45 +408,6 @@ public class PlayerManager {
 
         return (axisCoord == left || axisCoord == right) && (y >= bottomY && y <= topY);
     }
-
-    private Vec3d[] getTangentPoints(Portal portal, Vec3d playerEyePos) {
-        Direction.Axis contentAxis = portal.getAxis();
-        Direction.Axis planeAxis = Util.rotate(contentAxis);
-        final double epsilon = 1.0E-5;
-
-        double portalCenterOnPlaneAxis = Util.get(portal.getLowerLeft(), planeAxis) + 0.5;
-        double playerPosOnPlaneAxis = Util.get(playerEyePos, planeAxis);
-
-        double targetPlaneCoord;
-        if (playerPosOnPlaneAxis > portalCenterOnPlaneAxis) {
-            targetPlaneCoord = portalCenterOnPlaneAxis + 0.5;
-        } else {
-            targetPlaneCoord = portalCenterOnPlaneAxis - 0.5;
-        }
-
-        double topY = portal.getTop() + 1.0;
-        double bottomY = portal.getBottom();
-        double left = portal.getLeft();
-        double right = portal.getRight() + 1.0;
-
-        double midContentAxis = (left + right) / 2.0;
-        double midY = (bottomY + topY) / 2.0;
-
-        Vec3d[] points = new Vec3d[4];
-        if (planeAxis == Direction.Axis.X) {
-            points[0] = new Vec3d(targetPlaneCoord, topY - epsilon, midContentAxis);      // Top
-            points[1] = new Vec3d(targetPlaneCoord, bottomY + epsilon, midContentAxis);   // Bottom
-            points[2] = new Vec3d(targetPlaneCoord, midY, left + epsilon);               // Left
-            points[3] = new Vec3d(targetPlaneCoord, midY, right - epsilon);              // Right
-        } else {
-            points[0] = new Vec3d(midContentAxis, topY - epsilon, targetPlaneCoord);      // Top
-            points[1] = new Vec3d(midContentAxis, bottomY + epsilon, targetPlaneCoord);   // Bottom
-            points[2] = new Vec3d(left + epsilon, midY, targetPlaneCoord);               // Left
-            points[3] = new Vec3d(right - epsilon, midY, targetPlaneCoord);              // Right
-        }
-        return points;
-    }
-
 
     public void tickAsync(int tickCount) {
         if (!((PlayerInterface) player).immersivecursedness$getEnabled() || player.isSleeping()) {
