@@ -75,6 +75,12 @@ public class PlayerManager {
     private volatile Map<UUID, Entity> entitiesToUpdateOnMainThread = new HashMap<>();
     private final Set<BlockPos> previouslyVisibleBlocks = new HashSet<>();
 
+    // --- OPTIMIZATION: ViewFrustum Caching ---
+    private final Map<BlockPos, ViewFrustum> viewFrustumCache = new HashMap<>();
+    private final Map<BlockPos, ViewFrustum> entityFrustumCache = new HashMap<>();
+    private Vec3d lastPlayerPosForFrustumCache = Vec3d.ZERO;
+    private Vec2f lastPlayerLookForFrustumCache = Vec2f.ZERO;
+
 
     public PlayerManager(ServerPlayerEntity player, IC_Config icConfig, ServersideServer serversideServer) {
         this.player = player;
@@ -156,7 +162,11 @@ public class PlayerManager {
         }
 
         final double atmosphereRadius = Math.sqrt(icConfig.squaredAtmosphereRadius);
-        final ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal, atmosphereRadius);
+        // --- OPTIMIZATION: Use cached ViewFrustum ---
+        final ViewFrustum viewFrustum = viewFrustumCache.computeIfAbsent(
+                portal.getLowerLeft(),
+                k -> new ViewFrustum(player.getEyePos(), portal, atmosphereRadius)
+        );
 
         double distanceToPortalPlane = Math.abs(Util.get(player.getEyePos(), Util.rotate(portal.getAxis())) - Util.get(portal.getLowerLeft(), Util.rotate(portal.getAxis())));
         double proximityBuffer = Math.max(0, distanceToPortalPlane + 15); // Magic number I found that works for the last layer problem
@@ -341,6 +351,17 @@ public class PlayerManager {
             return;
         }
 
+        // --- OPTIMIZATION: Invalidate frustum cache if player moves/looks ---
+        final Vec3d currentPlayerPos = player.getPos();
+        final Vec2f currentPlayerLook = player.getRotationClient();
+
+        if (!currentPlayerPos.equals(this.lastPlayerPosForFrustumCache) || !currentPlayerLook.equals(this.lastPlayerLookForFrustumCache)) {
+            this.viewFrustumCache.clear();
+            this.entityFrustumCache.clear();
+            this.lastPlayerPosForFrustumCache = currentPlayerPos;
+            this.lastPlayerLookForFrustumCache = currentPlayerLook;
+        }
+
         final List<Entity> nearbyEntities = this.nearbyEntities;
         final Map<UUID, Entity> destinationEntityMap = this.destinationEntityMap;
         final List<Portal> portalsToProcess = this.portalsToProcess;
@@ -499,7 +520,11 @@ public class PlayerManager {
             for (Portal portal : portalsToProcess) {
                 TransformProfile transformProfile = portal.getTransformProfile();
                 if (transformProfile == null) continue;
-                ViewFrustum viewFrustum = new ViewFrustum(player.getEyePos(), portal);
+                // --- OPTIMIZATION: Use cached ViewFrustum ---
+                ViewFrustum viewFrustum = entityFrustumCache.computeIfAbsent(
+                        portal.getLowerLeft(),
+                        k -> new ViewFrustum(player.getEyePos(), portal)
+                );
                 if (viewFrustum.contains(transformProfile.untransform(realEntity.getPos()))) {
                     visibleRealEntities.put(realEntity.getUuid(), realEntity);
                     entityPortalContext.put(realEntity.getUuid(), portal);
@@ -785,6 +810,10 @@ public class PlayerManager {
         fakeToRealId.clear();
         lastTickVehicleMap.clear();
         entitiesToUpdateOnMainThread.clear();
+
+        // --- OPTIMIZATION: Clear frustum caches on purge ---
+        this.viewFrustumCache.clear();
+        this.entityFrustumCache.clear();
 
         serversideServer.addTask(() -> {
             if (!player.networkHandler.isConnectionOpen()) return;
