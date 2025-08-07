@@ -54,11 +54,6 @@ public class Util {
         return p.toCenterPos();
     }
 
-    public static OptionalChunk<Chunk> getChunkAsync(ServerWorld world, int x, int z) {
-        ServerChunkManagerInvoker chunkManager = (ServerChunkManagerInvoker) world.getChunkManager();
-        return chunkManager.ic$callGetChunkFuture(x, z, ChunkStatus.FULL, false).join();
-    }
-
     public static Optional<OptionalChunk<Chunk>> tryGetChunkAsync(ServerWorld world, int x, int z) {
         ServerChunkManagerInvoker chunkManager = (ServerChunkManagerInvoker) world.getChunkManager();
         CompletableFuture<OptionalChunk<Chunk>> future = chunkManager.ic$callGetChunkFuture(x, z, ChunkStatus.FULL, false);

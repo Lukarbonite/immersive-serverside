@@ -95,8 +95,8 @@ public class PlayerManager {
         boolean worldChanged = sourceWorld != this.currentSourceWorld;
         if (worldChanged || this.sourceView == null || this.destinationView == null) {
             this.currentSourceWorld = sourceWorld;
-            this.sourceView = new AsyncWorldView(sourceWorld, true);
-            this.destinationView = new AsyncWorldView(Util.getDestination(sourceWorld), true);
+            this.sourceView = new AsyncWorldView(sourceWorld);
+            this.destinationView = new AsyncWorldView(Util.getDestination(sourceWorld));
             purgeCache();
         }
 
