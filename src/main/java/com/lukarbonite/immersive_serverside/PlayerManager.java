@@ -147,6 +147,7 @@ public class PlayerManager {
         TransformProfile transformProfile = portal.getTransformProfile();
         if (transformProfile == null) return;
 
+        // Clear out the portal blocks themselves
         BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
             if (sourceView.getBlock(portalBlockPos).isOf(Blocks.NETHER_PORTAL)) {
                 BlockPos immutablePos = portalBlockPos.toImmutable();
@@ -162,11 +163,16 @@ public class PlayerManager {
         }
 
         final double atmosphereRadius = Math.sqrt(icConfig.squaredAtmosphereRadius);
-        // --- OPTIMIZATION: Use cached ViewFrustum ---
         final ViewFrustum viewFrustum = viewFrustumCache.computeIfAbsent(
                 portal.getLowerLeft(),
                 k -> new ViewFrustum(player.getEyePos(), portal, atmosphereRadius)
         );
+
+        // --- OPTIMIZATION: Pre-calculate values that are constant within the rendering loop ---
+        final FlatStandingRectangle portalRect = portal.toFlatStandingRectangle();
+        final Vec3d portalCenter = portalRect.getCenter();
+        final double squaredAtmosphereRadius = icConfig.squaredAtmosphereRadius;
+        final double squaredAtmosphereRadiusMinusOne = icConfig.squaredAtmosphereRadiusMinusOne;
 
         double distanceToPortalPlane = Math.abs(Util.get(player.getEyePos(), Util.rotate(portal.getAxis())) - Util.get(portal.getLowerLeft(), Util.rotate(portal.getAxis())));
         double proximityBuffer = Math.max(0, distanceToPortalPlane + 15); // Magic number I found that works for the last layer problem
@@ -197,12 +203,14 @@ public class PlayerManager {
                         continue;
                     }
 
-                    BlockPos immutablePos = mutPos.toImmutable();
-                    double distSq = portal.toFlatStandingRectangle().getCenter().squaredDistanceTo(mutPos.toCenterPos());
+                    // --- OPTIMIZATION: Use pre-calculated center and primitive math to avoid object allocation. ---
+                    // This avoids allocating a new Vec3d for every block via toCenterPos().
+                    double distSq = portalCenter.squaredDistanceTo(x + 0.5, y + 0.5, z + 0.5);
 
-                    if (distSq > icConfig.squaredAtmosphereRadiusMinusOne) {
+                    if (distSq > squaredAtmosphereRadiusMinusOne) {
+                        BlockPos immutablePos = mutPos.toImmutable(); // Immutable needed for collections and map keys
                         blocksInView.add(immutablePos);
-                        BlockState atmosphereState = (distSq > icConfig.squaredAtmosphereRadius) ? atmosphereBlock : atmosphereBetweenBlock;
+                        BlockState atmosphereState = (distSq > squaredAtmosphereRadius) ? atmosphereBlock : atmosphereBetweenBlock;
 
                         if (y == bottomOfWorld) atmosphereState = atmosphereBlock;
                         if (y == bottomOfWorld + 1) atmosphereState = atmosphereBetweenBlock;
@@ -213,8 +221,9 @@ public class PlayerManager {
                             blockUpdatesToSend.put(immutablePos, atmosphereState);
                         }
                     } else {
+                        BlockPos immutablePos = mutPos.toImmutable(); // Immutable needed for collections and map keys
                         blocksInView.add(immutablePos);
-                        BlockPos transformedPos = transformProfile.transform(immutablePos);
+                        BlockPos transformedPos = transformProfile.transform(immutablePos); // Still allocates, but unavoidable here
                         BlockState newState;
                         BlockEntity newBlockEntity = null;
 
@@ -388,7 +397,7 @@ public class PlayerManager {
 
         final List<Vec3d[]> currentRaycastDebugData = new ArrayList<>();
         final List<Vec3d[]> cornerRaycastDebugData = new ArrayList<>();
-        final List<Vec3d[]> offsetCornerRaycastDebugData = new ArrayList<>();
+        final List<Vec3d[]> offsetCornerRaycastDebugData = new ArrayList<>(); // <-- FIXED: Re-added this line
         final boolean debugEnabled = player.getWorld().getGameRules().getBoolean(ImmersiveServerside.PORTAL_DEBUG);
 
         for (Portal portal : portalsToProcess) {
