@@ -94,10 +94,18 @@ public class PlayerManager {
 
         boolean worldChanged = sourceWorld != this.currentSourceWorld;
         if (worldChanged || this.sourceView == null || this.destinationView == null) {
+            // --- REFACTOR: Handle dimension change by purging all old entities and re-initializing views ---
+            if (this.sourceView != null) { // Only purge if we had a previous world
+                // First, clear all cached fake entities from the previous dimension.
+                // This is crucial to prevent duplicate UUID warnings when respawning entities in the new dimension.
+                this.serversideServer.addTask(this::purgeAllFakeEntities);
+                this.previouslyVisibleBlocks.clear(); // Clear block cache as well
+            }
+
             this.currentSourceWorld = sourceWorld;
             this.sourceView = new AsyncWorldView(sourceWorld);
             this.destinationView = new AsyncWorldView(Util.getDestination(sourceWorld));
-            purgeCache();
+            // No need to purgeCache() here again as purgeAllFakeEntities handles it.
         }
 
         if (tickCount % 30 == 0 || worldChanged) {
@@ -616,6 +624,15 @@ public class PlayerManager {
             }
         }
 
+        // Send destroy packets FIRST to prevent client-side duplicate UUID warnings.
+        if (!entitiesToActuallyDestroy.isEmpty()) {
+            int[] idsToDestroy = entitiesToActuallyDestroy.stream().mapToInt(uuid -> realToFakeId.getOrDefault(uuid, 0)).filter(id -> id != 0).toArray();
+            if (idsToDestroy.length > 0) {
+                packetsToSend.add(new EntitiesDestroyS2CPacket(idsToDestroy));
+            }
+            entitiesToActuallyDestroy.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
+        }
+
         for (UUID uuid : entitiesToActuallyShow) {
             if (!shownFakeEntities.contains(uuid)) {
                 packetsToSend.add(fakeEntitySpawnPackets.get(uuid));
@@ -670,14 +687,6 @@ public class PlayerManager {
                     packetsToSend.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
                 }
             }
-        }
-
-        if (!entitiesToActuallyDestroy.isEmpty()) {
-            int[] idsToDestroy = entitiesToActuallyDestroy.stream().mapToInt(uuid -> realToFakeId.getOrDefault(uuid, 0)).filter(id -> id != 0).toArray();
-            if (idsToDestroy.length > 0) {
-                packetsToSend.add(new EntitiesDestroyS2CPacket(idsToDestroy));
-            }
-            entitiesToActuallyDestroy.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
         }
 
         shownFakeEntities.clear();
@@ -778,9 +787,40 @@ public class PlayerManager {
     }
 
     public void onRemoved() {
+        serversideServer.addTask(this::purgeAllFakeEntities);
+    }
+
+    /**
+     * Purges all fake entities and block updates associated with this player manager.
+     * This is called when the player logs off or the mod is disabled.
+     */
+    private void purgeAllFakeEntities() {
         serversideServer.addTask(() -> {
-            purgeCache();
-            purgeDebugEntities();
+            if (!player.networkHandler.isConnectionOpen()) return;
+
+            // Destroy all existing fake entities
+            List<Integer> fakeEntityIds = new ArrayList<>(realToFakeId.values());
+            if (!fakeEntityIds.isEmpty()) {
+                player.networkHandler.sendPacket(new EntitiesDestroyS2CPacket(fakeEntityIds.stream().mapToInt(i -> i).toArray()));
+            }
+
+            // Clear all internal tracking maps
+            realToFakeId.clear();
+            fakeToRealId.clear();
+            shownFakeEntities.clear();
+            hiddenEntities.clear();
+            flickerGuard.clear();
+            fakeEntityFlickerGuard.clear();
+            lastTickVehicleMap.clear();
+            entitiesToUpdateOnMainThread.clear();
+            // Also clear the block cache and frustum caches
+            blockCache.purgeAll((pos, cachedState) -> { /* no-op */ });
+            viewFrustumCache.clear();
+            entityFrustumCache.clear();
+            previouslyVisibleBlocks.clear();
+
+            // Purge debug entities as well
+            purgeDebugEntities(player.networkHandler::sendPacket);
         });
     }
 
@@ -796,6 +836,7 @@ public class PlayerManager {
             if (originalState != cachedState) updatesToSend.put(pos, originalState);
         });
 
+        // FIX: The 'entitiesToShow' variable was not defined in this scope.
         List<Entity> entitiesToShow = new ArrayList<>();
         if (!hiddenEntities.isEmpty()) {
             ServerWorld sourceWorld = player.getWorld();
@@ -819,10 +860,6 @@ public class PlayerManager {
         fakeToRealId.clear();
         lastTickVehicleMap.clear();
         entitiesToUpdateOnMainThread.clear();
-
-        // --- OPTIMIZATION: Clear frustum caches on purge ---
-        this.viewFrustumCache.clear();
-        this.entityFrustumCache.clear();
 
         serversideServer.addTask(() -> {
             if (!player.networkHandler.isConnectionOpen()) return;
