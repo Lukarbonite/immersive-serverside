@@ -196,6 +196,7 @@ public class PlayerManager {
         final BlockState atmosphereBetweenBlock = (sourceWorld.getRegistryKey() == World.OVERWORLD ? Blocks.RED_STAINED_GLASS : Blocks.BLUE_STAINED_GLASS).getDefaultState();
 
         final int bottomOfWorld = sourceWorld.getBottomY();
+        final int topOfWorld = sourceWorld.getTopYInclusive();
 
         for (Entity entity : nearbyEntities) {
             if (viewFrustum.contains(entity.getPos())) {
@@ -203,76 +204,65 @@ public class PlayerManager {
             }
         }
 
-        Box iterationBox = viewFrustum.getIterationBox(iterationDepth);
-        BlockPos.Mutable mutPos = new BlockPos.Mutable();
+        viewFrustum.iterate(posInFrustum -> {
+            if (isFrameBlock(posInFrustum, portal, sourceView)) {
+                return;
+            }
 
-        for (int y = MathHelper.floor(iterationBox.minY); y < MathHelper.ceil(iterationBox.maxY); y++) {
-            mutPos.setY(y);
-            for (int x = MathHelper.floor(iterationBox.minX); x < MathHelper.ceil(iterationBox.maxX); x++) {
-                mutPos.setX(x);
-                for (int z = MathHelper.floor(iterationBox.minZ); z < MathHelper.ceil(iterationBox.maxZ); z++) {
-                    mutPos.setZ(z);
+            // --- OPTIMIZATION: Use pre-calculated center and primitive math to avoid object allocation. ---
+            // This avoids allocating a new Vec3d for every block via toCenterPos().
+            double distSq = portalCenter.squaredDistanceTo(posInFrustum.getX() + 0.5, posInFrustum.getY() + 0.5, posInFrustum.getZ() + 0.5);
 
-                    if (!viewFrustum.contains(mutPos) || isFrameBlock(mutPos, portal, sourceView)) {
-                        continue;
-                    }
+            if (distSq > squaredAtmosphereRadiusMinusOne) {
+                BlockPos immutablePos = posInFrustum.toImmutable(); // Immutable needed for collections and map keys
+                blocksInView.add(immutablePos);
+                BlockState atmosphereState = (distSq > squaredAtmosphereRadius) ? atmosphereBlock : atmosphereBetweenBlock;
 
-                    // --- OPTIMIZATION: Use pre-calculated center and primitive math to avoid object allocation. ---
-                    // This avoids allocating a new Vec3d for every block via toCenterPos().
-                    double distSq = portalCenter.squaredDistanceTo(x + 0.5, y + 0.5, z + 0.5);
+                if (posInFrustum.getY() == bottomOfWorld) atmosphereState = atmosphereBlock;
+                if (posInFrustum.getY() == bottomOfWorld + 1) atmosphereState = atmosphereBetweenBlock;
 
-                    if (distSq > squaredAtmosphereRadiusMinusOne) {
-                        BlockPos immutablePos = mutPos.toImmutable(); // Immutable needed for collections and map keys
-                        blocksInView.add(immutablePos);
-                        BlockState atmosphereState = (distSq > squaredAtmosphereRadius) ? atmosphereBlock : atmosphereBetweenBlock;
+                BlockState cachedState = blockCache.get(immutablePos);
+                if (!atmosphereState.equals(cachedState)) {
+                    blockCache.put(immutablePos, atmosphereState);
+                    blockUpdatesToSend.put(immutablePos, atmosphereState);
+                }
+            } else {
+                BlockPos immutablePos = posInFrustum.toImmutable(); // Immutable needed for collections and map keys
+                blocksInView.add(immutablePos);
+                BlockPos transformedPos = transformProfile.transform(immutablePos); // Still allocates, but unavoidable here
+                BlockState newState;
+                BlockEntity newBlockEntity = null;
 
-                        if (y == bottomOfWorld) atmosphereState = atmosphereBlock;
-                        if (y == bottomOfWorld + 1) atmosphereState = atmosphereBetweenBlock;
+                boolean occlude = !portal.hasCorners() && Util.get(transformedPos, Util.rotate(transformProfile.getTargetAxis(portal.getAxis()))) == Util.get(transformProfile.getTargetPos(), Util.rotate(transformProfile.getTargetAxis(portal.getAxis())));
 
-                        BlockState cachedState = blockCache.get(immutablePos);
-                        if (!atmosphereState.equals(cachedState)) {
-                            blockCache.put(immutablePos, atmosphereState);
-                            blockUpdatesToSend.put(immutablePos, atmosphereState);
-                        }
+                if (occlude) {
+                    newState = Blocks.AIR.getDefaultState();
+                } else {
+                    BlockState stateFromOtherDimension = destinationView.getBlock(transformedPos);
+                    if (stateFromOtherDimension.isOf(Blocks.NETHER_PORTAL)) {
+                        newState = Blocks.AIR.getDefaultState();
                     } else {
-                        BlockPos immutablePos = mutPos.toImmutable(); // Immutable needed for collections and map keys
-                        blocksInView.add(immutablePos);
-                        BlockPos transformedPos = transformProfile.transform(immutablePos); // Still allocates, but unavoidable here
-                        BlockState newState;
-                        BlockEntity newBlockEntity = null;
+                        newState = transformProfile.rotateState(stateFromOtherDimension);
+                        newBlockEntity = destinationView.getBlockEntity(transformedPos);
+                    }
+                }
 
-                        boolean occlude = !portal.hasCorners() && Util.get(transformedPos, Util.rotate(transformProfile.getTargetAxis(portal.getAxis()))) == Util.get(transformProfile.getTargetPos(), Util.rotate(transformProfile.getTargetAxis(portal.getAxis())));
+                if (posInFrustum.getY() == bottomOfWorld) newState = atmosphereBlock;
+                if (posInFrustum.getY() == bottomOfWorld + 1) newState = atmosphereBetweenBlock;
 
-                        if (occlude) {
-                            newState = Blocks.AIR.getDefaultState();
-                        } else {
-                            BlockState stateFromOtherDimension = destinationView.getBlock(transformedPos);
-                            if (stateFromOtherDimension.isOf(Blocks.NETHER_PORTAL)) {
-                                newState = Blocks.AIR.getDefaultState();
-                            } else {
-                                newState = transformProfile.rotateState(stateFromOtherDimension);
-                                newBlockEntity = destinationView.getBlockEntity(transformedPos);
-                            }
-                        }
-
-                        if (y == bottomOfWorld) newState = atmosphereBlock;
-                        if (y == bottomOfWorld + 1) newState = atmosphereBetweenBlock;
-
-                        BlockState cachedState = blockCache.get(immutablePos);
-                        if (!newState.equals(cachedState)) {
-                            blockCache.put(immutablePos, newState);
-                            blockUpdatesToSend.put(immutablePos, newState);
-                            if (newBlockEntity != null) {
-                                Packet<?> packet = Util.createFakeBlockEntityPacket(newBlockEntity, immutablePos, sourceWorld);
-                                if (packet != null) {
-                                    packetList.add(packet);
-                                }
-                            }
+                BlockState cachedState = blockCache.get(immutablePos);
+                if (!newState.equals(cachedState)) {
+                    blockCache.put(immutablePos, newState);
+                    blockUpdatesToSend.put(immutablePos, newState);
+                    if (newBlockEntity != null) {
+                        Packet<?> packet = Util.createFakeBlockEntityPacket(newBlockEntity, immutablePos, sourceWorld);
+                        if (packet != null) {
+                            packetList.add(packet);
                         }
                     }
                 }
             }
-        }
+        }, iterationDepth, bottomOfWorld, topOfWorld);
     }
 
     private boolean isOccludedByOppositeFrame(Portal portal, AsyncWorldView worldView, List<Vec3d[]> raycastDebugData) {

@@ -2,12 +2,13 @@ package com.lukarbonite.immersive_serverside.objects;
 
 import com.lukarbonite.immersive_serverside.Util;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Vector3f;
 
 import java.util.Arrays;
+import java.util.function.Consumer;
 
 /**
  * Represents the 3D viewing frustum created by looking from an origin point through a rectangular portal.
@@ -18,6 +19,7 @@ public class ViewFrustum {
     private final Vec3d origin;
     // The portal's plane, used for near-plane clipping
     private final Vec3d portalPlaneNormal;
+    private final Direction.Axis portalPlaneAxis;
     private final Vec3d portalOrigin;
     // The four planes that define the sides of the frustum.
     // The normal vector of each plane points *outwards* from the frustum volume.
@@ -37,6 +39,7 @@ public class ViewFrustum {
         this.atmosphereRadius = atmosphereRadius;
 
         final Direction.Axis portalPlaneAxis = Util.rotate(portal.getAxis());
+        this.portalPlaneAxis = portalPlaneAxis;
         final double playerPlanePos = Util.get(origin, portalPlaneAxis);
         final double portalBlockCoordinate = Util.get(portal.getLowerLeft(), portalPlaneAxis);
 
@@ -123,49 +126,89 @@ public class ViewFrustum {
         this(origin, portal, 0); // Keep old constructor for compatibility.
     }
 
+    /**
+     * Efficiently iterates through every block position within the view frustum.
+     * This works by "scan-converting" the frustum volume along its depth axis. For each slice
+     * along the depth, it calculates the 2D cross-section of the frustum and iterates only
+     * the blocks within that 2D shape. This avoids iterating a large bounding box and
+     * performing expensive `contains` checks on every single block.
+     *
+     * @param consumer The operation to perform on each BlockPos inside the frustum.
+     * @param depth The maximum distance to iterate from the portal plane.
+     * @param minY The minimum world Y coordinate to consider.
+     * @param maxY The maximum world Y coordinate to consider.
+     */
+    public void iterate(Consumer<BlockPos> consumer, int depth, int minY, int maxY) {
+        if (leftPlaneNormal == Vec3d.ZERO) return; // Frustum is collapsed, nothing to iterate.
+
+        Direction.Axis depthAxis = this.portalPlaneAxis;
+        Direction.Axis uAxis, vAxis;
+        switch (depthAxis) {
+            case X -> { uAxis = Direction.Axis.Y; vAxis = Direction.Axis.Z; }
+            case Y -> { uAxis = Direction.Axis.X; vAxis = Direction.Axis.Z; }
+            default -> { uAxis = Direction.Axis.X; vAxis = Direction.Axis.Y; }
+        }
+
+        double originDepth = Util.get(origin, depthAxis);
+        double portalOriginDepth = Util.get(portalOrigin, depthAxis);
+
+        int step = originDepth > portalOriginDepth ? -1 : 1;
+        int startDepth = MathHelper.floor(portalOriginDepth);
+        int endDepth = startDepth + step * depth;
+
+        Vec3d[] rays = new Vec3d[4];
+        for (int i = 0; i < 4; i++) {
+            rays[i] = frustumBaseCorners[i].subtract(origin);
+        }
+
+        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
+
+        for (int d = startDepth; d != endDepth; d += step) {
+            Util.set(mutablePos, d, depthAxis);
+
+            double minU = Double.POSITIVE_INFINITY, maxU = Double.NEGATIVE_INFINITY;
+            double minV = Double.POSITIVE_INFINITY, maxV = Double.NEGATIVE_INFINITY;
+
+            // Calculate the 2D bounds of the frustum at this depth slice
+            for (Vec3d ray : rays) {
+                double rayDepthComponent = Util.get(ray, depthAxis);
+                if (Math.abs(rayDepthComponent) < 1e-7) continue;
+
+                double t = (d - originDepth) / rayDepthComponent;
+                Vec3d intersect = origin.add(ray.multiply(t));
+
+                minU = Math.min(minU, Util.get(intersect, uAxis));
+                maxU = Math.max(maxU, Util.get(intersect, uAxis));
+                minV = Math.min(minV, Util.get(intersect, vAxis));
+                maxV = Math.max(maxV, Util.get(intersect, vAxis));
+            }
+
+            int startU = MathHelper.floor(minU);
+            int endU = MathHelper.ceil(maxU);
+            int startV = MathHelper.floor(minV);
+            int endV = MathHelper.ceil(maxV);
+
+            // Iterate within the calculated 2D bounds for this slice
+            for (int u = startU; u < endU; u++) {
+                Util.set(mutablePos, u, uAxis);
+                // Clamp vertical iteration to world height
+                int clampedStartV = (vAxis == Direction.Axis.Y) ? Math.max(startV, minY) : startV;
+                int clampedEndV = (vAxis == Direction.Axis.Y) ? Math.min(endV, maxY + 1) : endV;
+
+                for (int v = clampedStartV; v < clampedEndV; v++) {
+                    Util.set(mutablePos, v, vAxis);
+                    consumer.accept(mutablePos);
+                }
+            }
+        }
+    }
+
     public Vec3d[] getFrustumBaseCorners() {
         return this.frustumBaseCorners;
     }
 
     public Vec3d getPortalPlaneNormal() {
         return this.portalPlaneNormal;
-    }
-
-    public Box getIterationBox(int depth) {
-        // Start with the player's eye position
-        double minX = origin.x, minY = origin.y, minZ = origin.z;
-        double maxX = origin.x, maxY = origin.y, maxZ = origin.z;
-
-        // Get the four corners of the projected base on the far plane
-        Vec3d[] farCorners = new Vec3d[4];
-        for (int i=0; i<4; i++) {
-            Vec3d dir = frustumBaseCorners[i].subtract(origin);
-            if (dir.lengthSquared() > 1e-7) {
-                farCorners[i] = origin.add(dir.normalize().multiply(depth));
-            } else {
-                farCorners[i] = frustumBaseCorners[i]; // If a corner is at the eye, use that
-            }
-        }
-
-        // Expand the box to include the far corners
-        for (Vec3d v : farCorners) {
-            minX = Math.min(minX, v.x);
-            minY = Math.min(minY, v.y);
-            minZ = Math.min(minZ, v.z);
-            maxX = Math.max(maxX, v.x);
-            maxY = Math.max(maxY, v.y);
-            maxZ = Math.max(maxZ, v.z);
-        }
-
-        Box frustumBox = new Box(minX, minY, minZ, maxX, maxY, maxZ);
-
-        // Also include the atmosphere sphere in the iteration box
-        if (this.atmosphereRadius > 0 && this.portalCenter != null) {
-            Box atmosphereBox = new Box(this.portalCenter, this.portalCenter).expand(this.atmosphereRadius);
-            return frustumBox.union(atmosphereBox).expand(1.0);
-        }
-
-        return frustumBox.expand(1.0);
     }
 
     /**
