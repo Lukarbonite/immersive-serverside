@@ -16,6 +16,7 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerPosition;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.PacketByteBuf;
+import net.minecraft.network.listener.ClientPlayPacketListener;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.*;
 import net.minecraft.server.network.EntityTrackerEntry;
@@ -580,6 +581,7 @@ public class PlayerManager {
     }
 
     private void processFakeEntities(List<Packet<?>> packetsToSend, Map<UUID, Entity> destinationEntityMap, List<Portal> portalsToProcess) {
+        final List<Packet<? super ClientPlayPacketListener>> bundledPackets = new ArrayList<>();
         Map<UUID, Entity> visibleRealEntities = new HashMap<>();
         Map<UUID, Portal> entityPortalContext = new HashMap<>();
         for (Entity realEntity : destinationEntityMap.values()) {
@@ -639,7 +641,7 @@ public class PlayerManager {
         }
 
         Set<UUID> visibleUuids = visibleRealEntities.keySet();
-        Map<UUID, Packet<?>> fakeEntitySpawnPackets = new HashMap<>();
+        Map<UUID, EntitySpawnS2CPacket> fakeEntitySpawnPackets = new HashMap<>();
         for (Entity realEntity : visibleRealEntities.values()) {
             UUID uuid = realEntity.getUuid();
             Portal portal = entityPortalContext.get(uuid);
@@ -677,14 +679,14 @@ public class PlayerManager {
         if (!entitiesToActuallyDestroy.isEmpty()) {
             int[] idsToDestroy = entitiesToActuallyDestroy.stream().mapToInt(uuid -> realToFakeId.getOrDefault(uuid, 0)).filter(id -> id != 0).toArray();
             if (idsToDestroy.length > 0) {
-                packetsToSend.add(new EntitiesDestroyS2CPacket(idsToDestroy));
+                bundledPackets.add(new EntitiesDestroyS2CPacket(idsToDestroy));
             }
             entitiesToActuallyDestroy.forEach(uuid -> fakeEntityFlickerGuard.put(uuid, FLICKER_GUARD_TICKS));
         }
 
         for (UUID uuid : entitiesToActuallyShow) {
             if (!shownFakeEntities.contains(uuid)) {
-                packetsToSend.add(fakeEntitySpawnPackets.get(uuid));
+                bundledPackets.add(fakeEntitySpawnPackets.get(uuid));
             }
         }
 
@@ -698,13 +700,13 @@ public class PlayerManager {
             Vec3d fakePos = transformProfile.untransform(realEntity.getPos());
             Vec3d fakeVel = transformProfile.untransformVector(realEntity.getVelocity());
             float fakeYaw = transformProfile.untransformYaw(realEntity.getYaw());
-            packetsToSend.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
+            bundledPackets.add(new EntityPositionS2CPacket(fakeId, new PlayerPosition(fakePos, fakeVel, fakeYaw, realEntity.getPitch()), Collections.emptySet(), realEntity.isOnGround()));
             float fakeHeadYaw = transformProfile.untransformYaw(realEntity.getHeadYaw());
             byte headYawByte = (byte) MathHelper.floor(fakeHeadYaw * 256.0F / 360.0F);
             EntitySetHeadYawS2CPacket headYawPacket = new EntitySetHeadYawS2CPacket(realEntity, (byte)0);
             ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setEntityId(fakeId);
             ((EntitySetHeadYawS2CPacketAccessor) headYawPacket).ic$setHeadYaw(headYawByte);
-            packetsToSend.add(headYawPacket);
+            bundledPackets.add(headYawPacket);
 
             if (isNew && realEntity instanceof LivingEntity) {
                 LivingEntity livingEntity = (LivingEntity) realEntity;
@@ -713,13 +715,13 @@ public class PlayerManager {
                     equipmentList.add(Pair.of(slot, livingEntity.getEquippedStack(slot)));
                 }
                 if (!equipmentList.isEmpty()) {
-                    packetsToSend.add(new EntityEquipmentUpdateS2CPacket(fakeId, equipmentList));
+                    bundledPackets.add(new EntityEquipmentUpdateS2CPacket(fakeId, equipmentList));
                 }
             }
             if (isNew) {
                 List<DataTracker.SerializedEntry<?>> trackedValues = realEntity.getDataTracker().getChangedEntries();
                 if (trackedValues != null && !trackedValues.isEmpty()) {
-                    packetsToSend.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
+                    bundledPackets.add(new EntityTrackerUpdateS2CPacket(fakeId, trackedValues));
                 }
             }
         }
@@ -733,7 +735,7 @@ public class PlayerManager {
                     PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
                     buf.writeVarInt(fakeVehicleId);
                     buf.writeIntArray(visiblePassengerIds);
-                    packetsToSend.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
+                    bundledPackets.add(EntityPassengersSetS2CPacket.CODEC.decode(buf));
                 }
             }
         }
@@ -741,6 +743,10 @@ public class PlayerManager {
         shownFakeEntities.clear();
         shownFakeEntities.addAll(entitiesToActuallyShow);
         this.entitiesToUpdateOnMainThread = new HashMap<>(visibleRealEntities);
+
+        if (!bundledPackets.isEmpty()) {
+            packetsToSend.add(new BundleS2CPacket(bundledPackets));
+        }
     }
 
     private boolean isDebugCleanupNeeded() {
