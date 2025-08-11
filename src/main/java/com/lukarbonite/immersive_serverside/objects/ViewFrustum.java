@@ -164,6 +164,9 @@ public class ViewFrustum {
         BlockPos.Mutable mutablePos = new BlockPos.Mutable();
 
         for (int d = startDepth; d != endDepth; d += step) {
+            if (depthAxis == Direction.Axis.Y && (d < minY || d > maxY)) {
+                continue;
+            }
             Util.set(mutablePos, d, depthAxis);
 
             double minU = Double.POSITIVE_INFINITY, maxU = Double.NEGATIVE_INFINITY;
@@ -188,13 +191,15 @@ public class ViewFrustum {
             int startV = MathHelper.floor(minV);
             int endV = MathHelper.ceil(maxV);
 
-            // Iterate within the calculated 2D bounds for this slice
-            for (int u = startU; u < endU; u++) {
-                Util.set(mutablePos, u, uAxis);
-                // Clamp vertical iteration to world height
-                int clampedStartV = (vAxis == Direction.Axis.Y) ? Math.max(startV, minY) : startV;
-                int clampedEndV = (vAxis == Direction.Axis.Y) ? Math.min(endV, maxY + 1) : endV;
+            // Corrected Clamping Logic
+            int clampedStartU = (uAxis == Direction.Axis.Y) ? Math.max(startU, minY) : startU;
+            int clampedEndU = (uAxis == Direction.Axis.Y) ? Math.min(endU, maxY + 1) : endU;
+            int clampedStartV = (vAxis == Direction.Axis.Y) ? Math.max(startV, minY) : startV;
+            int clampedEndV = (vAxis == Direction.Axis.Y) ? Math.min(endV, maxY + 1) : endV;
 
+            // Iterate within the calculated 2D bounds for this slice
+            for (int u = clampedStartU; u < clampedEndU; u++) {
+                Util.set(mutablePos, u, uAxis);
                 for (int v = clampedStartV; v < clampedEndV; v++) {
                     Util.set(mutablePos, v, vAxis);
                     consumer.accept(mutablePos);

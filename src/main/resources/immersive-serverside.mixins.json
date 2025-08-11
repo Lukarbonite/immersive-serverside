@@ -6,6 +6,10 @@
   "mixins": [
     "EntityPositionS2CPacketAccessor",
     "EntitySetHeadYawS2CPacketAccessor",
+    "LightingProviderAccessor",
+    "LightUpdateS2CPacketInvoker",
+    "LightStorageAccessor",
+    "ChunkLightProviderAccessor",
     "MixinServerPlayerEntity",
     "NetherPortalBlockMixin",
     "PortalForcerMixin",

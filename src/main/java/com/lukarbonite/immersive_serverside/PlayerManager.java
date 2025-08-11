@@ -21,20 +21,30 @@ import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.*;
 import net.minecraft.server.network.EntityTrackerEntry;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerLightingProvider;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.TypeFilter;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
+import net.minecraft.world.LightType;
 import net.minecraft.world.RaycastContext;
 import net.minecraft.world.World;
 import com.lukarbonite.immersive_serverside.mixin.EntitySetHeadYawS2CPacketAccessor;
+import com.lukarbonite.immersive_serverside.mixin.LightUpdateS2CPacketInvoker;
+import com.lukarbonite.immersive_serverside.mixin.LightingProviderAccessor;
+import com.lukarbonite.immersive_serverside.mixin.LightStorageAccessor;
+import com.lukarbonite.immersive_serverside.mixin.ChunkLightProviderAccessor;
+import net.minecraft.world.chunk.ChunkNibbleArray;
+import net.minecraft.world.chunk.light.ChunkLightProvider;
+import net.minecraft.world.chunk.light.LightStorage;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 public class PlayerManager {
     private final IC_Config icConfig;
@@ -78,7 +88,7 @@ public class PlayerManager {
     private volatile Map<UUID, Entity> destinationEntityMap = new HashMap<>();
     private volatile List<Portal> portalsToProcess = new ArrayList<>();
     private volatile Map<UUID, Entity> entitiesToUpdateOnMainThread = new HashMap<>();
-    private final Set<BlockPos> previouslyVisibleBlocks = new HashSet<>();
+    private final Set<BlockPos> previouslyVisibleBlocks = ConcurrentHashMap.newKeySet();
 
     // --- OPTIMIZATION: ViewFrustum Caching ---
     private final Map<BlockPos, ViewFrustum> viewFrustumCache = new HashMap<>();
@@ -157,11 +167,11 @@ public class PlayerManager {
         }
     }
 
-    private void processPortalRendering(Portal portal, ServerWorld sourceWorld, Set<BlockPos> blocksInView, Set<BlockPos> atmosphereBlocksInView, BlockUpdateMap blockUpdatesToSend, List<Packet<?>> packetList, Set<UUID> entitiesInCullingZone, List<Entity> nearbyEntities, List<Vec3d[]> raycastDebugData) {
+    private void processPortalRendering(Portal portal, ServerWorld sourceWorld, Set<BlockPos> blocksInView, Map<BlockPos, TransformProfile> blockToProfileMap, BlockUpdateMap blockUpdatesToSend, List<Packet<?>> packetList, Set<UUID> entitiesInCullingZone, List<Entity> nearbyEntities, List<Vec3d[]> raycastDebugData) {
         TransformProfile transformProfile = portal.getTransformProfile();
         if (transformProfile == null) return;
 
-        // Clear out the portal blocks themselves
+        // Always clear out the portal blocks themselves to allow passthrough
         BlockPos.iterate(portal.getLowerLeft(), portal.getUpperRight()).forEach(portalBlockPos -> {
             if (sourceView.getBlock(portalBlockPos).isOf(Blocks.NETHER_PORTAL)) {
                 BlockPos immutablePos = portalBlockPos.toImmutable();
@@ -172,6 +182,7 @@ public class PlayerManager {
             }
         });
 
+        // If occluded, skip the expensive rendering of the other side.
         if (isOccludedByOppositeFrame(portal, sourceView, raycastDebugData)) {
             return;
         }
@@ -213,9 +224,10 @@ public class PlayerManager {
             // This avoids allocating a new Vec3d for every block via toCenterPos().
             double distSq = portalCenter.squaredDistanceTo(posInFrustum.getX() + 0.5, posInFrustum.getY() + 0.5, posInFrustum.getZ() + 0.5);
 
+            BlockPos immutablePos = posInFrustum.toImmutable(); // Immutable needed for collections and map keys
+            blocksInView.add(immutablePos);
+
             if (distSq > squaredAtmosphereRadiusMinusOne) {
-                BlockPos immutablePos = posInFrustum.toImmutable(); // Immutable needed for collections and map keys
-                blocksInView.add(immutablePos);
                 BlockState atmosphereState = (distSq > squaredAtmosphereRadius) ? atmosphereBlock : atmosphereBetweenBlock;
 
                 if (posInFrustum.getY() == bottomOfWorld) atmosphereState = atmosphereBlock;
@@ -227,8 +239,7 @@ public class PlayerManager {
                     blockUpdatesToSend.put(immutablePos, atmosphereState);
                 }
             } else {
-                BlockPos immutablePos = posInFrustum.toImmutable(); // Immutable needed for collections and map keys
-                blocksInView.add(immutablePos);
+                blockToProfileMap.put(immutablePos, transformProfile);
                 BlockPos transformedPos = transformProfile.transform(immutablePos); // Still allocates, but unavoidable here
                 BlockState newState;
                 BlockEntity newBlockEntity = null;
@@ -439,7 +450,7 @@ public class PlayerManager {
         final List<Packet<?>> packetsToSend = new ArrayList<>();
         final BlockUpdateMap blockUpdatesToSend = new BlockUpdateMap();
         final Set<BlockPos> blocksInViewPositions = new HashSet<>();
-        final Set<BlockPos> atmosphereBlocksInView = new HashSet<>();
+        final Map<BlockPos, TransformProfile> blockToProfileMap = new HashMap<>();
         final Set<UUID> entitiesInCullingZone = new HashSet<>();
         boolean isNearPortal = false;
 
@@ -452,7 +463,7 @@ public class PlayerManager {
             if (portal.isCloserThan(player.getPos(), 8)) {
                 isNearPortal = true;
             }
-            processPortalRendering(portal, sourceWorld, blocksInViewPositions, atmosphereBlocksInView, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities, currentRaycastDebugData);
+            processPortalRendering(portal, sourceWorld, blocksInViewPositions, blockToProfileMap, blockUpdatesToSend, packetsToSend, entitiesInCullingZone, nearbyEntities, currentRaycastDebugData);
 
             if (debugEnabled) {
                 final double extensionLength = icConfig.portalDepth;
@@ -506,11 +517,105 @@ public class PlayerManager {
         Set<BlockPos> blocksToPurge = new HashSet<>(this.previouslyVisibleBlocks);
         blocksToPurge.removeAll(blocksInViewPositions);
 
+        // --- BEGIN LIGHTING ---
+        final Map<ChunkSectionPos, Pair<ChunkNibbleArray, ChunkNibbleArray>> sectionLightData = new HashMap<>();
+        final ServerWorld destWorld = this.destinationView.getWorld();
+        final ServerLightingProvider sourceLightProvider = sourceWorld.getChunkManager().getLightingProvider();
+        final LightingProviderAccessor lightProviderAccessor = (LightingProviderAccessor) sourceLightProvider;
+
+        for (BlockPos sourcePos : blockToProfileMap.keySet()) {
+            final TransformProfile profile = blockToProfileMap.get(sourcePos);
+            if (profile == null) continue;
+
+            final ChunkSectionPos sourceSectionPos = ChunkSectionPos.from(sourcePos);
+            final Pair<ChunkNibbleArray, ChunkNibbleArray> lightArrays = sectionLightData.computeIfAbsent(
+                    sourceSectionPos,
+                    (pos) -> {
+                        ChunkLightProvider<?, ?> skyLightProvider = lightProviderAccessor.ic$getSkyLightProvider();
+                        ChunkLightProvider<?, ?> blockLightProvider = lightProviderAccessor.ic$getBlockLightProvider();
+
+                        ChunkNibbleArray sky = null;
+                        if (skyLightProvider != null) {
+                            LightStorageAccessor skyAccessor = (LightStorageAccessor) ((ChunkLightProviderAccessor) skyLightProvider).ic$getLightStorage();
+                            sky = skyAccessor.ic$getLightSection(pos.asLong());
+                        }
+
+                        ChunkNibbleArray block = null;
+                        if (blockLightProvider != null) {
+                            LightStorageAccessor blockAccessor = (LightStorageAccessor) ((ChunkLightProviderAccessor) blockLightProvider).ic$getLightStorage();
+                            block = blockAccessor.ic$getLightSection(pos.asLong());
+                        }
+
+                        return Pair.of(
+                                sky != null ? sky.copy() : new ChunkNibbleArray(),
+                                block != null ? block.copy() : new ChunkNibbleArray()
+                        );
+                    }
+            );
+
+            final BlockPos transformedPos = profile.transform(sourcePos);
+            final int skyLight = destWorld.getLightLevel(LightType.SKY, transformedPos);
+            final int blockLight = destWorld.getLightLevel(LightType.BLOCK, transformedPos);
+
+            final short packedLocalPos = ChunkSectionPos.packLocal(sourcePos);
+            final int localX = ChunkSectionPos.unpackLocalX(packedLocalPos);
+            final int localY = ChunkSectionPos.unpackLocalY(packedLocalPos);
+            final int localZ = ChunkSectionPos.unpackLocalZ(packedLocalPos);
+
+            lightArrays.getFirst().set(localX, localY, localZ, skyLight);
+            lightArrays.getSecond().set(localX, localY, localZ, blockLight);
+        }
+
+        final Map<ChunkPos, SortedMap<Integer, Pair<byte[], byte[]>>> chunkLightData = new HashMap<>();
+        final int bottomYIndex = sourceWorld.getBottomSectionCoord();
+
+        for (Map.Entry<ChunkSectionPos, Pair<ChunkNibbleArray, ChunkNibbleArray>> entry : sectionLightData.entrySet()) {
+            ChunkSectionPos sectionPos = entry.getKey();
+            Pair<ChunkNibbleArray, ChunkNibbleArray> arrays = entry.getValue();
+
+            chunkLightData
+                    .computeIfAbsent(sectionPos.toChunkPos(), k -> new TreeMap<>())
+                    .put(sectionPos.getY() - bottomYIndex, Pair.of(arrays.getFirst().asByteArray(), arrays.getSecond().asByteArray()));
+        }
+
+        for (Map.Entry<ChunkPos, SortedMap<Integer, Pair<byte[], byte[]>>> entry : chunkLightData.entrySet()) {
+            final ChunkPos chunkPos = entry.getKey();
+            final SortedMap<Integer, Pair<byte[], byte[]>> sortedSections = entry.getValue();
+
+            final BitSet skyLightMask = new BitSet();
+            final BitSet blockLightMask = new BitSet();
+            final List<byte[]> skyLightUpdates = new ArrayList<>();
+            final List<byte[]> blockLightUpdates = new ArrayList<>();
+
+            for (Map.Entry<Integer, Pair<byte[], byte[]>> sectionEntry : sortedSections.entrySet()) {
+                int yIndex = sectionEntry.getKey();
+                Pair<byte[], byte[]> lightArrays = sectionEntry.getValue();
+
+                skyLightMask.set(yIndex);
+                blockLightMask.set(yIndex);
+                skyLightUpdates.add(lightArrays.getFirst());
+                blockLightUpdates.add(lightArrays.getSecond());
+            }
+
+            PacketByteBuf buf = new PacketByteBuf(Unpooled.buffer());
+            buf.writeVarInt(chunkPos.x);
+            buf.writeVarInt(chunkPos.z);
+            buf.writeBitSet(skyLightMask);
+            buf.writeBitSet(blockLightMask);
+            buf.writeBitSet(new BitSet());
+            buf.writeBitSet(new BitSet());
+            buf.writeCollection(skyLightUpdates, (packetByteBuf, bytes) -> packetByteBuf.writeByteArray(bytes));
+            buf.writeCollection(blockLightUpdates, (packetByteBuf, bytes) -> packetByteBuf.writeByteArray(bytes));
+
+            packetsToSend.add(LightUpdateS2CPacketInvoker.ic$create(buf));
+        }
+
+        final Set<ChunkSectionPos> purgedSections = new HashSet<>();
         blockCache.purgePositions(blocksToPurge, (pos, cachedState) -> {
             if (sourceView.getBlock(pos).isOf(Blocks.NETHER_PORTAL) && !portalsToProcess.isEmpty()) {
                 return;
             }
-
+            purgedSections.add(ChunkSectionPos.from(pos));
             BlockState originalState = sourceView.getBlock(pos);
             if (!originalState.equals(cachedState)) {
                 blockUpdatesToSend.put(pos, originalState);
@@ -523,6 +628,29 @@ public class PlayerManager {
                 }
             }
         });
+
+        purgedSections.removeAll(sectionLightData.keySet());
+
+        if (!purgedSections.isEmpty()) {
+            final Map<ChunkPos, BitSet> sectionsToRevertByChunk = purgedSections.stream()
+                    .collect(Collectors.groupingBy(
+                            ChunkSectionPos::toChunkPos,
+                            Collectors.mapping(
+                                    sectionPos -> sectionPos.getY() - bottomYIndex,
+                                    Collectors.collectingAndThen(Collectors.toList(), list -> {
+                                        BitSet bitSet = new BitSet();
+                                        list.forEach(bitSet::set);
+                                        return bitSet;
+                                    })
+                            )
+                    ));
+
+            for (Map.Entry<ChunkPos, BitSet> entry : sectionsToRevertByChunk.entrySet()) {
+                packetsToSend.add(new LightUpdateS2CPacket(entry.getKey(), sourceWorld.getChunkManager().getLightingProvider(), entry.getValue(), entry.getValue()));
+            }
+        }
+        // --- END LIGHTING ---
+
 
         this.previouslyVisibleBlocks.clear();
         this.previouslyVisibleBlocks.addAll(blocksInViewPositions);
